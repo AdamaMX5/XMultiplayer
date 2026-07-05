@@ -20,6 +20,10 @@ function joinMessage(sessionCode: string, playerName: string) {
   return JSON.stringify({ v: 1, type: "session", action: "join", seq: 0, ts: Date.now(), sessionCode, playerName });
 }
 
+function spawnMessage(objectId: string, owner: string) {
+  return JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId, shipType: "ship_generic_fighter_01", owner });
+}
+
 test("two clients in the same session receive each other's state_update but not their own", async () => {
   const { wss, port } = await startTestServer();
   const a = new WebSocket(`ws://localhost:${port}`);
@@ -203,6 +207,186 @@ test("an oversized frame closes that connection but the server stays usable for 
 
   b.close();
   c.close();
+  wss.close();
+});
+
+test("a spawn message is broadcast to existing session members", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-9", "Alice"));
+  b.send(joinMessage("arena-9", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const received = once(b, "message");
+  a.send(spawnMessage("ship-alice", "Alice"));
+  const raw = await received;
+  const parsed = JSON.parse((raw as Buffer).toString());
+  assert.equal(parsed.type, "spawn");
+  assert.equal(parsed.objectId, "ship-alice");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("a late-joining member is replayed previously spawned proxies", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+  a.send(joinMessage("arena-10", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await once(b, "open");
+  const replayed = once(b, "message");
+  b.send(joinMessage("arena-10", "Bob"));
+  const raw = await replayed;
+  const parsed = JSON.parse((raw as Buffer).toString());
+  assert.equal(parsed.type, "spawn");
+  assert.equal(parsed.objectId, "ship-alice");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("a disconnecting member's spawned proxies are despawned for remaining members", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-11", "Alice"));
+  b.send(joinMessage("arena-11", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Collect every message Bob receives from here on, instead of chaining once() calls:
+  // the disconnect below fires "leave" and "despawn" broadcasts back-to-back, and a
+  // fresh once() registered only after awaiting the first can miss the second if it
+  // already arrived (WebSocket "message" events are not queued for late listeners).
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const parsedMessages = bMessages.map((m) => JSON.parse(m));
+  const despawn = parsedMessages.find((m) => m.type === "despawn");
+  assert.ok(despawn, `expected a despawn message among: ${bMessages.join(", ")}`);
+  assert.equal(despawn.objectId, "ship-alice");
+  assert.equal(despawn.reason, "disconnect");
+
+  b.close();
+  wss.close();
+});
+
+test("a late joiner is not replayed spawns from a session that already emptied out", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+  a.send(joinMessage("arena-12", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await once(b, "open");
+  let received = false;
+  b.on("message", () => (received = true));
+  b.send(joinMessage("arena-12", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "Alice's spawn must have been forgotten once she disconnected");
+
+  b.close();
+  wss.close();
+});
+
+test("a late joiner is replayed spawns only from its own session, never from a concurrent foreign session", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+  a.send(joinMessage("arena-13a", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await once(b, "open");
+  const receivedByB: string[] = [];
+  b.on("message", (data) => receivedByB.push(data.toString()));
+  b.send(joinMessage("arena-13b", "Bob")); // different session code than Alice's
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.deepEqual(receivedByB, [], "a late joiner of a different session must not see another session's spawns");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("a member that spawned multiple proxies has all of them despawned on disconnect", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-14", "Alice"));
+  b.send(joinMessage("arena-14", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  a.send(spawnMessage("ship-alice-1", "Alice"));
+  a.send(spawnMessage("ship-alice-2", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const despawnedIds = bMessages
+    .map((m) => JSON.parse(m))
+    .filter((m) => m.type === "despawn")
+    .map((m) => m.objectId)
+    .sort();
+  assert.deepEqual(despawnedIds, ["ship-alice-1", "ship-alice-2"]);
+
+  b.close();
+  wss.close();
+});
+
+test("respawning the same objectId replays only the newest spawn to a late joiner, not both", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+  a.send(joinMessage("arena-15", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "old_type", owner: "Alice" }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "new_type", owner: "Alice" }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await once(b, "open");
+  const receivedByB: string[] = [];
+  b.on("message", (data) => receivedByB.push(data.toString()));
+  b.send(joinMessage("arena-15", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const spawnsReplayed = receivedByB.map((m) => JSON.parse(m)).filter((m) => m.type === "spawn" && m.objectId === "ship-alice");
+  assert.equal(spawnsReplayed.length, 1, "must not replay both the old and the new spawn for the same objectId");
+  assert.equal(spawnsReplayed[0].shipType, "new_type");
+
+  a.close();
+  b.close();
   wss.close();
 });
 

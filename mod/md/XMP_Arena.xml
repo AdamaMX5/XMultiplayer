@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="XMP_Arena" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../libraries/md.xsd">
+  <!--
+    XMultiplayer Arena: proxy spawn/despawn/teleport (Milestone A2).
+
+    Everything in this file is PLAUSIBLE, not VERIFIED, same status as XMP_Telemetry.xml
+    (see that file's header and docs/A1-messprotokoll.md for the write-side assumptions,
+    which this file reuses via XMP_Telemetry_WriteToPipe).
+
+    THE SINGLE HIGHEST-RISK ITEM IN THIS FILE: reading and parsing inbound JSON.
+    MD has no confirmed native JSON/string-parsing capability. XMP_Arena_ExtractField
+    below is ONE deliberately isolated helper cue standing in for whatever concrete
+    mechanism turns out to work in-game, so that if it needs to be rewritten, it is a
+    single, localized change rather than scattered assumptions across this file.
+    CANONICAL DESCRIPTION OF THE FALLBACK PLAN (if MD truly cannot parse strings
+    like this): docs/A2-messprotokoll.md section 1, two options (one field per
+    pipe write, or a "|"-delimited line format), decided only after the first
+    in-game test of XMP_Arena_ExtractField, not implemented yet either way.
+
+    Further assumptions specific to this file:
+      - md.Named_Pipes signals "OnLineReceived" with the raw received line in
+        event.param3 (mirroring the raw-string write side; the API is assumed to be a
+        dumb byte/line pipe with no JSON awareness in either direction).
+      - Proxy ships are tracked in a dynamically-keyed table $XMP.Proxies.{objectId}
+        (MD's `$Var.{$Key}` associative-index pattern, as used for keyed blackboard-style
+        data in vanilla scripts).
+      - create_ship's `macro` attribute accepts the shipType string sent over the wire
+        directly as a macro name/reference (spawn.shipType is set to
+        player.entity.macro.name on the sending side, so it is already a macro name).
+      - set_object_position accepts both a position and a rotation table in one call,
+        per PlanMod.md's explicit call-out of set_object_position as the naive-teleport
+        action for A2; if the engine actually needs a separate rotation-setting action,
+        that is the second thing to fix after the JSON-parsing assumption above.
+  -->
+  <cues>
+    <!--
+      Announces our own ship to the rest of the session once telemetry starts, so
+      other clients know to spawn a proxy for us. Reuses XMP_Telemetry_WriteToPipe
+      (XMP_Telemetry.xml) for the actual write/retry/backoff handling, so this cue
+      only has to build the JSON payload.
+    -->
+    <cue name="XMP_Arena_AnnounceSpawn" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship">
+          <do_all>
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;spawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
+                + ',&quot;shipType&quot;:&quot;' + player.entity.macro.name + '&quot;'
+                + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          </do_all>
+          <else>
+            <debug_text text="'[XMultiplayer][Arena] no player ship yet, cannot announce spawn'" filter="general" />
+          </else>
+        </do_if>
+      </actions>
+    </cue>
+
+    <!--
+      Inbound: fires once per NDJSON line the agent forwards from the relay server
+      (another session member's spawn/despawn/state_update). Self-resetting, same
+      pattern as XMP_Telemetry_Tick, so it keeps listening for the next line.
+    -->
+    <cue name="XMP_Arena_OnReceive" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.OnLineReceived" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.RxLine" exact="event.param3" />
+          <include_interrupt_actions ref="XMP_Arena_Dispatch" />
+        </do_all>
+      </actions>
+      <cues>
+        <cue name="XMP_Arena_OnReceive_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!-- Reads the "type" field and routes to the matching handler. -->
+    <cue name="XMP_Arena_Dispatch" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'type'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxType" exact="$XMP.ExtractValue" />
+          <do_if value="$XMP.RxType == 'spawn'">
+            <include_interrupt_actions ref="XMP_Arena_HandleSpawn" />
+          </do_if>
+          <do_if value="$XMP.RxType == 'despawn'">
+            <include_interrupt_actions ref="XMP_Arena_HandleDespawn" />
+          </do_if>
+          <do_if value="$XMP.RxType == 'state_update'">
+            <include_interrupt_actions ref="XMP_Arena_HandleStateUpdate" />
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Extracts the raw JSON value for $XMP.ExtractKey out of $XMP.RxLine into
+      $XMP.ExtractValue (as a string; callers convert to number themselves where
+      needed). See the file header: this is the single most speculative cue here.
+    -->
+    <cue name="XMP_Arena_ExtractField" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractNeedle" exact="'&quot;' + $XMP.ExtractKey + '&quot;:'" />
+          <find_string name="$XMP.ExtractKeyPos" exact="$XMP.RxLine" pattern="$XMP.ExtractNeedle" start="0" />
+          <set_value name="$XMP.ExtractValueStart" exact="$XMP.ExtractKeyPos + $XMP.ExtractNeedle.length" />
+          <find_string name="$XMP.ExtractCommaPos" exact="$XMP.RxLine" pattern="','" start="$XMP.ExtractValueStart" />
+          <find_string name="$XMP.ExtractBracePos" exact="$XMP.RxLine" pattern="'}'" start="$XMP.ExtractValueStart" />
+          <set_value name="$XMP.ExtractEnd" exact="min{value1=$XMP.ExtractCommaPos, value2=$XMP.ExtractBracePos}" />
+          <set_value name="$XMP.ExtractValue"
+            exact="$XMP.RxLine.{substring: $XMP.ExtractValueStart, $XMP.ExtractEnd}.{replace: '&quot;', ''}" />
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Creates a proxy ship for a remote player's spawn and remembers it keyed by
+      objectId, so later state_update/despawn messages for the same objectId can
+      find it again. Naive placement at the local player's own position for now;
+      the very next state_update for this objectId will teleport it to the right
+      place (A3 replaces the teleport with Dead Reckoning).
+    -->
+    <cue name="XMP_Arena_HandleSpawn" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'objectId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxObjectId" exact="$XMP.ExtractValue" />
+
+          <set_value name="$XMP.ExtractKey" exact="'shipType'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxShipType" exact="$XMP.ExtractValue" />
+
+          <set_value name="$XMP.ExtractKey" exact="'owner'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxOwner" exact="$XMP.ExtractValue" />
+
+          <do_if value="not $XMP.Proxies.{$XMP.RxObjectId}.exists">
+            <do_all>
+              <create_ship name="$XMP.NewProxyShip" macro="$XMP.RxShipType" position="player.entity.position" owner="player" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="$XMP.NewProxyShip" />
+              <debug_text text="'[XMultiplayer][Arena] spawned proxy for ' + $XMP.RxOwner + ' (objectId=' + $XMP.RxObjectId + ')'" filter="general" />
+            </do_all>
+            <else>
+              <debug_text text="'[XMultiplayer][Arena] spawn for already-known objectId=' + $XMP.RxObjectId + ', ignoring'" filter="general" />
+            </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!-- Removes a remote player's proxy (they disconnected, or the server told us to). -->
+    <cue name="XMP_Arena_HandleDespawn" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'objectId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxObjectId" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
+            <do_all>
+              <destroy_object object="$XMP.Proxies.{$XMP.RxObjectId}" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="null" />
+              <debug_text text="'[XMultiplayer][Arena] despawned proxy objectId=' + $XMP.RxObjectId" filter="general" />
+            </do_all>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Naive teleport (A2 baseline, per PlanMod.md A2): moves and rotates the proxy
+      to exactly the received position/rotation on every update, no smoothing at
+      all. Expected to look rough at anything but very low relative speeds; that
+      rough baseline is the point (A2's "how bad is the jitter, really?" question),
+      replaced by Dead Reckoning extrapolation in A3.
+    -->
+    <cue name="XMP_Arena_HandleStateUpdate" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'shipId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxObjectId" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'position'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxPositionJson" exact="$XMP.ExtractValue" />
+
+              <set_value name="$XMP.ExtractKey" exact="'rotation'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxRotationJson" exact="$XMP.ExtractValue" />
+
+              <!-- Sub-extraction: position/rotation are nested objects, so we run the
+                   same field extractor again against just their substrings. -->
+              <set_value name="$XMP.RxLine" exact="$XMP.RxPositionJson" />
+              <set_value name="$XMP.ExtractKey" exact="'x'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxPosX" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'y'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxPosY" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'z'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxPosZ" exact="$XMP.ExtractValue.{tonumber}" />
+
+              <set_value name="$XMP.RxLine" exact="$XMP.RxRotationJson" />
+              <set_value name="$XMP.ExtractKey" exact="'qx'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxRotQX" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qy'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxRotQY" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qz'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxRotQZ" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qw'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxRotQW" exact="$XMP.ExtractValue.{tonumber}" />
+
+              <set_object_position
+                object="$XMP.Proxies.{$XMP.RxObjectId}"
+                position="table[x=$XMP.RxPosX, y=$XMP.RxPosY, z=$XMP.RxPosZ]"
+                rotation="table[x=$XMP.RxRotQX, y=$XMP.RxRotQY, z=$XMP.RxRotQZ, w=$XMP.RxRotQW]" />
+            </do_all>
+            <else>
+              <!-- We haven't seen a spawn for this objectId yet (e.g. we joined mid-session
+                   before the spawn replay arrived); drop the update, nothing to move. -->
+            </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+  </cues>
+</mdscript>

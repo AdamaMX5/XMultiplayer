@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- See clusters.xml for the overall Arena galaxy content status/assumptions. -->
+<zones>
+  <zone name="XMP_Arena_Zone" instantiate="1">
+    <macro name="XMP_Arena_Zone_macro" class="zone">
+      <component ref="standardzone" />
+    </macro>
+  </zone>
+</zones>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  XMultiplayer Arena galaxy content (Milestone A2). PLAUSIBLE, not VERIFIED: shaped
+  after the common "add a new cluster/sector/zone" pattern used by many X4 sector
+  mods, but not loaded in-game in this environment. See docs/A2-messprotokoll.md.
+
+  Deliberately minimal: one cluster, one sector, one zone, empty space (the first
+  of PlanMod.md 1.1's map variants, "Referenz/Debug"). No stations, no gates to
+  the rest of the universe: reachable only via the XMP_Arena_Start gamestart
+  (libraries/gamestarts.xml), so it can never collide with or leak into a normal
+  save. No entries reference this sector from god.xml/jobs.xml, so it has zero
+  NPC/faction/economy activity by omission; nothing to explicitly disable.
+-->
+<clusters>
+  <cluster name="Cluster_XMP_Arena" instantiate="1">
+    <macro name="Cluster_XMP_Arena_macro" class="cluster">
+      <component ref="standardcluster" />
+      <properties>
+        <identification name="{20206,9001}" description="{20206,9002}" />
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Sector_connection" ref="sectors">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Cluster" ref="XMP_Arena_Sector_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </cluster>
+</clusters>

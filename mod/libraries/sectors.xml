@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- See clusters.xml for the overall Arena galaxy content status/assumptions. -->
+<sectors>
+  <sector name="XMP_Arena_Sector" instantiate="1">
+    <macro name="XMP_Arena_Sector_macro" class="sector">
+      <component ref="standardsector" />
+      <properties>
+        <identification name="{20206,9003}" description="{20206,9004}" />
+        <sound reference="ambient_sector_default" />
+        <!-- Empty space: no region/asteroid/nebula content for this first Arena
+             map variant (PlanMod.md 1.1 lists asteroid/debris/nebula variants as
+             later additions). -->
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Zone_connection" ref="zones">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Sector" ref="XMP_Arena_Zone_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </sector>
+</sectors>

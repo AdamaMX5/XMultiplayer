@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Diff-patches the vanilla galaxy to attach Cluster_XMP_Arena_macro (clusters.xml).
+  See clusters.xml for the overall Arena galaxy content status/assumptions.
+
+  Deliberately placed at a large offset, far outside the normal galaxy map, and
+  with no gate/highway connections to any existing cluster: the Arena is reachable
+  only via the XMP_Arena_Start gamestart (gamestarts.xml), never by flying there,
+  so it cannot interfere with a normal save's map or economy.
+-->
+<diff>
+  <add sel="/galaxy/connections">
+    <connection name="Cluster_XMP_Arena_connection" ref="clusters">
+      <offset>
+        <position x="2000000" y="0" z="2000000" />
+      </offset>
+      <macro connection="Galaxy" ref="Cluster_XMP_Arena_macro" />
+    </connection>
+  </add>
+</diff>

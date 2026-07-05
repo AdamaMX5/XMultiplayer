@@ -9,10 +9,12 @@ export interface RelayServerOptions {
 
 /**
  * Relay server: groups WebSocket clients into sessions by session code and
- * broadcasts every message to the other members of the same session. Session
- * join/leave is the only message type the server itself interprets; every other
- * message type is forwarded verbatim (the server does not validate ship/HP logic
- * in A1 -- that lands with the HP-authority work in A4).
+ * broadcasts every message to the other members of the same session. Besides
+ * session join/leave, the server also tracks `spawn` messages (A2) so it can
+ * replay currently-spawned proxies to a newly joined member and despawn a
+ * member's proxies when they disconnect; every other message type (including
+ * `state_update`) is forwarded verbatim (the server does not validate ship/HP
+ * logic in A1/A2 -- that lands with the HP-authority work in A4).
  */
 export function startRelayServer(options: RelayServerOptions): WebSocketServer {
   // Same cap as parseMessage/NdjsonSplitter (protocol/src/limits.ts) so oversized
@@ -73,6 +75,9 @@ function handleMessage(
     console.warn(`[server] message from ${clientId} outside a session, ignored`);
     return;
   }
+  if (msg.type === "spawn") {
+    sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw);
+  }
   broadcast(sessionCode, clientId, raw, sessions, sockets);
 }
 
@@ -86,6 +91,21 @@ function joinSession(
   sessions.join(msg.sessionCode, member);
   console.log(`[server] ${member.playerName} (${clientId}) joined session ${msg.sessionCode}`);
   broadcast(msg.sessionCode, clientId, JSON.stringify(msg), sessions, sockets);
+  replaySpawns(msg.sessionCode, clientId, sessions, sockets);
+}
+
+/** Sends previously spawned proxies (from other members) to a newly joined member, so it doesn't start blind. */
+function replaySpawns(
+  sessionCode: string,
+  clientId: string,
+  sessions: SessionManager,
+  sockets: Map<string, WebSocket>
+): void {
+  const socket = sockets.get(clientId);
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  for (const raw of sessions.spawnsOf(sessionCode)) {
+    socket.send(raw);
+  }
 }
 
 function broadcast(
@@ -106,9 +126,21 @@ function handleDisconnect(clientId: string, sessions: SessionManager, sockets: M
   const left = sessions.leave(clientId);
   if (!left) return;
   console.log(`[server] ${left.member.playerName} (${clientId}) left session ${left.sessionCode}`);
-  // Structure for despawn-broadcast prep: once ship/object IDs are tracked per
-  // member, emit a despawn message here too. Full logic lands in A2.
   broadcastLeave(left.sessionCode, clientId, left.member, sessions, sockets);
+  broadcastDespawns(left.sessionCode, clientId, sessions, sockets);
+}
+
+/** Despawns whatever proxies the disconnecting member had spawned, so they don't linger as ghosts for others. */
+function broadcastDespawns(
+  sessionCode: string,
+  clientId: string,
+  sessions: SessionManager,
+  sockets: Map<string, WebSocket>
+): void {
+  for (const objectId of sessions.takeSpawnedObjectIds(clientId, sessionCode)) {
+    const despawnMsg = JSON.stringify({ v: 1, type: "despawn", seq: 0, ts: Date.now(), objectId, reason: "disconnect" });
+    broadcast(sessionCode, clientId, despawnMsg, sessions, sockets);
+  }
 }
 
 function broadcastLeave(

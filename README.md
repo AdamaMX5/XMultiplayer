@@ -78,8 +78,15 @@ konfigurierbar über `--pipe-name`) und wartet auf die Verbindung durch das Spie
 ```bash
 cd agent
 npm start                    # Terminal 1: Agent
-npm run simulate             # Terminal 2: Fake-X4-Client, sendet 10 Hz Kreisflug-Telemetrie
+npm run simulate -- --pipe-name xmultiplayer --ship ship_arg_s_fighter_01_a_macro --owner Alice --object-id sim-A
+                              # Terminal 2: Fake-X4-Client, meldet sich per spawn an und
+                              # sendet danach 10 Hz Kreisflug-Telemetrie
 ```
+
+Für den vollen A2-Beweis (Proxy-Spawn + Teleport zwischen zwei Spielern) zwei
+Agent/Simulator-Paare mit unterschiedlichem `--pipe-name` gegen denselben
+Relay-Server starten; jede Simulator-Instanz loggt dann `[sim] remote spawn ...`
+und `[sim] remote pos ...` für die jeweils andere.
 
 ### Mod installieren
 

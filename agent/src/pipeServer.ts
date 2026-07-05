@@ -17,9 +17,15 @@ export interface PipeServerCallbacks {
  * SirNukes Mod Support APIs) is the pipe *client*; the agent stays listening so that
  * closing/reopening the game (pipe client disconnect/reconnect) does not require
  * restarting the agent -- see docs/A1-messprotokoll.md for the framing assumption.
+ *
+ * Bidirectional since A2: besides reading the local player's own telemetry (onLine),
+ * write() pushes other session members' messages (spawn/despawn/state_update, relayed
+ * from the WebSocket) down into the game so the mod can react to them (spawn proxies,
+ * teleport them on updates).
  */
 export class PipeServer {
   private server: Server;
+  private activeSocket: Socket | null = null;
 
   constructor(private path: string, private callbacks: PipeServerCallbacks) {
     this.server = createServer((socket) => this.handleConnection(socket));
@@ -34,7 +40,15 @@ export class PipeServer {
     this.server.close();
   }
 
+  /** Writes a single NDJSON line to the currently connected game client, if any. Returns whether it was actually sent. */
+  write(line: string): boolean {
+    if (!this.activeSocket || this.activeSocket.destroyed) return false;
+    this.activeSocket.write(line + "\n");
+    return true;
+  }
+
   private handleConnection(socket: Socket): void {
+    this.activeSocket = socket;
     this.callbacks.onClientConnected?.();
     const splitter = new NdjsonSplitter({ onOversizedLine: this.callbacks.onOversizedLine });
     socket.on("data", (chunk) => {
@@ -42,7 +56,10 @@ export class PipeServer {
         this.callbacks.onLine(line);
       }
     });
-    socket.on("close", () => this.callbacks.onClientDisconnected?.());
+    socket.on("close", () => {
+      if (this.activeSocket === socket) this.activeSocket = null;
+      this.callbacks.onClientDisconnected?.();
+    });
     socket.on("error", (err) => this.callbacks.onError?.(err));
   }
 }

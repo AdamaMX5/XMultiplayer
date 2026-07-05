@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Custom gamestart dropping the player directly into XMP_Arena_Sector_macro (see
+  clusters.xml/sectors.xml) with a single starting fighter, no faction/economy ties.
+  PLAUSIBLE, not VERIFIED: gamestarts.xml's schema is the least-confident piece of
+  this milestone's galaxy content, alongside the JSON parsing in XMP_Arena.xml (see
+  docs/A2-messprotokoll.md).
+
+  Loadout references a vanilla Argon light fighter macro as a placeholder; swapping
+  in a purpose-built Arena ship/loadout is future work (PlanMod.md A5, "Schiffs-
+  Loadout-Übertragung").
+-->
+<gamestarts>
+  <gamestart name="XMP_Arena_Start" locationclass="sector" location="XMP_Arena_Sector_macro" showstartmenu="1">
+    <name>{20206,9005}</name>
+    <description>{20206,9006}</description>
+    <briefing>{20206,9007}</briefing>
+    <mode gameoption="normal" />
+    <faction ref="player" />
+    <player name="{20206,9008}" money="0" />
+    <loadout>
+      <ship macro="ship_arg_s_fighter_01_a_macro" name="{20206,9009}">
+        <position x="0" y="0" z="0" />
+      </ship>
+    </loadout>
+  </gamestart>
+</gamestarts>

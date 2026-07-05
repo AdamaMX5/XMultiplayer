@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Text page for the Arena galaxy content (clusters.xml/sectors.xml/gamestarts.xml),
+  English (language 44). PLAUSIBLE, not VERIFIED: page/path naming convention
+  (t/0001-L044.xml, page id 20206) follows the standard X4 text-file pattern, not
+  confirmed against this extension in-game.
+-->
+<language id="44">
+  <page id="20206">
+    <t id="9001">XMultiplayer Arena</t>
+    <t id="9002">A dedicated, empty arena cluster for XMultiplayer PvP sessions.</t>
+    <t id="9003">Arena Sector</t>
+    <t id="9004">An empty sector reserved for XMultiplayer arena duels.</t>
+    <t id="9005">XMultiplayer Arena</t>
+    <t id="9006">Start a dedicated PvP arena session. No factions, no economy, no jobs -- just you, your opponent, and empty space.</t>
+    <t id="9007">You have joined an XMultiplayer arena session. Wait for your opponent to connect, then fight.</t>
+    <t id="9008">Arena Pilot</t>
+    <t id="9009">Arena Fighter</t>
+  </page>
+</language>

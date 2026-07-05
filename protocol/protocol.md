@@ -2,9 +2,15 @@
 
 Wire format: one JSON object per message, newline-delimited (NDJSON) on the Named Pipe
 (game <-> agent) and as individual text frames on the WebSocket (agent <-> relay server).
-The relay server forwards messages verbatim between session members; it does not
-transform payloads in A1 (it only inspects `type: "session"` messages for join/leave
-bookkeeping).
+The relay server forwards messages verbatim between session members; besides
+`type: "session"` (join/leave bookkeeping), it also inspects `type: "spawn"` since A2,
+to replay previously spawned proxies to late joiners and to despawn a member's
+proxies when they disconnect (see `server/src/sessionManager.ts`).
+
+**Correlation:** a `spawn.objectId` and subsequent `state_update.shipId` for the same
+ship must be the same value -- that's how a receiver matches an incoming position
+update to the proxy it already created. The sending side is responsible for this
+(both are set from the same underlying entity id on the mod side).
 
 Every message carries an envelope:
 
@@ -123,3 +129,24 @@ passed as the relay server's WebSocket `maxPayload`. Without this cap a line tha
 never finds its terminating newline (or an oversized WebSocket frame) would grow a
 receive buffer without bound -- enforcing the same limit at all three points closes
 that resource-exhaustion gap uniformly across both transports.
+
+## Ship macro whitelist (A2)
+
+`SHIP_MACRO_WHITELIST`/`isKnownShipMacro` (`src/shipMacros.ts`) is a second,
+independent check applied to `spawn.shipType` specifically: from A2 on, the
+Server -> Agent -> MD direction carries data from another player, which the agent
+treats as untrusted input. The agent rejects (logs + drops, does not write to the
+pipe) any `spawn` whose `shipType` is not on this whitelist, and the simulator
+(`agent/src/simulate.ts`) validates its own `--ship` value against it at startup
+with a hard error rather than silently sending a bogus macro name into `create_ship`.
+
+## JSON parsing in MD (known risk, documented fallback not yet implemented)
+
+The Named Pipe stays JSON/NDJSON in both directions, including for `spawn`/
+`despawn`/`state_update` going from the agent into the game. MD has no confirmed
+native JSON-parsing capability; `mod/md/XMP_Arena.xml`'s `XMP_Arena_ExtractField`
+cue is the single, isolated point standing in for whatever mechanism actually works
+in-game. **Canonical description of the fallback plan (if it turns out MD cannot
+parse JSON like this): `docs/A2-messprotokoll.md` section 1** -- two options (one
+field per pipe write, or a `|`-delimited line format), decided only after the first
+in-game test of `XMP_Arena_ExtractField`, not implemented yet either way.

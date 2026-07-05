@@ -146,6 +146,66 @@ test("handles two clients connecting and disconnecting in sequence without cross
   server.stop();
 });
 
+test("write() returns false and does not throw when no game client is connected", async () => {
+  const path = testPipePath();
+  const server = await startServer(path, { onLine: () => {} });
+
+  assert.equal(server.write('{"type":"spawn"}'), false);
+  server.stop();
+});
+
+test("write() delivers a line to the connected game client", async () => {
+  const path = testPipePath();
+  const server = await startServer(path, { onLine: () => {} });
+  const client = connect(path);
+  await once(client, "connect");
+  await new Promise((resolve) => setTimeout(resolve, 20)); // let the server's own "connection" accept catch up
+
+  const received = once(client, "data");
+  const sent = server.write('{"type":"spawn","objectId":"ship-a"}');
+  assert.equal(sent, true);
+  const data = await received;
+  assert.equal((data as Buffer).toString(), '{"type":"spawn","objectId":"ship-a"}\n');
+
+  client.end();
+  server.stop();
+});
+
+test("write() returns false again after the game client disconnects", async () => {
+  const path = testPipePath();
+  const server = await startServer(path, { onLine: () => {} });
+  const client = connect(path);
+  await once(client, "connect");
+  client.end();
+  await once(client, "close");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(server.write('{"type":"despawn"}'), false);
+  server.stop();
+});
+
+test("write() targets the new client after a reconnect", async () => {
+  const path = testPipePath();
+  const server = await startServer(path, { onLine: () => {} });
+
+  const first = connect(path);
+  await once(first, "connect");
+  first.end();
+  await once(first, "close");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const second = connect(path);
+  await once(second, "connect");
+  await new Promise((resolve) => setTimeout(resolve, 20)); // let the server's own "connection" accept catch up
+  const received = once(second, "data");
+  assert.equal(server.write('{"type":"spawn"}'), true);
+  const data = await received;
+  assert.equal((data as Buffer).toString(), '{"type":"spawn"}\n');
+
+  second.end();
+  server.stop();
+});
+
 test("stop() closes the server so further connection attempts fail", async () => {
   const path = testPipePath();
   const server = await startServer(path, { onLine: () => {} });
