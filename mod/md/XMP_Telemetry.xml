@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="XMP_Telemetry" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../libraries/md.xsd">
+  <!--
+    XMultiplayer telemetry export (Milestone A1).
+
+    Everything in this file is PLAUSIBLE, not VERIFIED: it has not been run inside X4
+    (no game install available in this environment). Cue/action/attribute names follow
+    standard Mission Director conventions as documented for other mods, but the exact
+    signal names and parameter shapes of the SirNukes Mod Support APIs' Named_Pipes
+    component are assumptions and MUST be checked against the actual API on first
+    in-game test. See docs/A1-messprotokoll.md for the open-questions checklist.
+
+    Assumptions made here, to validate in-game:
+      - md.Named_Pipes signals "Reloaded" once the API is ready to accept connections.
+      - md.Named_Pipes.Write is triggered via signal_cue_instantly with a param table
+        of the shape { pipe = <pipe name>, msg = <string> }.
+      - The API auto-connects/opens the pipe by name on first write; there is no
+        separate explicit "connect" call required (else add one in XMP_Telemetry_Setup).
+      - MD has no native JSON type. We build the JSON payload by string concatenation
+        (see $XMP.Json below) and rely on all fields being simple numbers/strings so
+        no escaping is required. If player names ever contain quotes this will break;
+        flagged for A5 (session/comfort) to harden.
+      - There is a companion success signal (assumed md.Named_Pipes.OnWriteSuccess)
+        mirroring the failure signal below. Without it there is no way to tell a
+        healthy pipe apart from one that silently swallows writes, so backoff would
+        never reset. Validate both signal names in-game.
+  -->
+  <cues>
+    <!-- Waits for the Named Pipe API to be ready, then kicks off the telemetry loop. -->
+    <cue name="XMP_Telemetry_Setup" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.PipeName" exact="'xmultiplayer'" />
+          <set_value name="$XMP.Seq" exact="0" />
+          <set_value name="$XMP.RetryDelayMs" exact="1000" />
+          <!-- Game-time (player.age) before which sending is suspended; 0 = not paused. -->
+          <set_value name="$XMP.PausedUntil" exact="0" />
+          <set_value name="$XMP.LastRateWindowStart" exact="player.age" />
+          <set_value name="$XMP.TicksThisWindow" exact="0" />
+          <set_value name="$XMP.MeasuredRate" exact="0" />
+          <debug_text text="'[XMultiplayer] Named_Pipes API ready (pipe=' + $XMP.PipeName + '), starting telemetry loop'" filter="general" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Telemetry_Tick" />
+      </cues>
+    </cue>
+
+    <!--
+      Periodic export cue. Target rate: 10 Hz (100ms delay). MD cues do not tick
+      frame-accurately (PlanMod.md 0.3); actual achieved rate is measured below
+      via $XMP.MeasuredRate and sent as "md_rate" in every message, so the agent
+      and server can tell a slow MD tick apart from real network jitter.
+
+      While a write backoff is active ($XMP.PausedUntil > player.age, set by
+      XMP_Telemetry_WriteFailed below), this cue keeps ticking every 100ms but
+      skips measuring/sending; the tick itself must stay cheap and frequent so
+      it notices as soon as the pause window elapses, only the expensive part
+      (building and writing the payload) is suspended.
+    -->
+    <cue name="XMP_Telemetry_Tick" instantiate="true">
+      <delay exact="100ms" />
+      <actions>
+        <do_if value="player.age &gt;= $XMP.PausedUntil">
+          <do_all>
+            <include_interrupt_actions ref="XMP_Telemetry_MeasureRate" />
+            <include_interrupt_actions ref="XMP_Telemetry_BuildAndSend" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <!-- Self-resetting loop: re-arms this cue once its actions finish. -->
+        <cue name="XMP_Telemetry_Tick_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!-- Rate measurement: counts ticks in a rolling 1-second window. -->
+    <cue name="XMP_Telemetry_MeasureRate" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.TicksThisWindow" exact="$XMP.TicksThisWindow + 1" />
+          <do_if value="player.age - $XMP.LastRateWindowStart &gt;= 1s">
+            <set_value name="$XMP.MeasuredRate" exact="$XMP.TicksThisWindow / (player.age - $XMP.LastRateWindowStart)" />
+            <set_value name="$XMP.TicksThisWindow" exact="0" />
+            <set_value name="$XMP.LastRateWindowStart" exact="player.age" />
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Builds the state_update JSON payload (player ship position/rotation/velocity)
+      and writes it to the pipe. String concatenation stands in for JSON serialization
+      since MD has no native JSON support (see file header).
+    -->
+    <cue name="XMP_Telemetry_BuildAndSend" instantiate="false">
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship">
+          <do_all>
+            <set_value name="$XMP.Seq" exact="$XMP.Seq + 1" />
+            <set_value name="$XMP.Pos" exact="player.entity.position" />
+            <set_value name="$XMP.Vel" exact="player.entity.speed" />
+            <set_value name="$XMP.Rot" exact="player.entity.quaternion" />
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;state_update&quot;,&quot;seq&quot;:' + $XMP.Seq
+                + ',&quot;ts&quot;:' + player.age
+                + ',&quot;shipId&quot;:&quot;' + player.entity.id + '&quot;'
+                + ',&quot;position&quot;:{&quot;x&quot;:' + $XMP.Pos.x + ',&quot;y&quot;:' + $XMP.Pos.y + ',&quot;z&quot;:' + $XMP.Pos.z + '}'
+                + ',&quot;rotation&quot;:{&quot;qx&quot;:' + $XMP.Rot.x + ',&quot;qy&quot;:' + $XMP.Rot.y + ',&quot;qz&quot;:' + $XMP.Rot.z + ',&quot;qw&quot;:' + $XMP.Rot.w + '}'
+                + ',&quot;velocity&quot;:{&quot;x&quot;:' + $XMP.Vel.x + ',&quot;y&quot;:' + $XMP.Vel.y + ',&quot;z&quot;:' + $XMP.Vel.z + '}'
+                + ',&quot;mdRate&quot;:' + $XMP.MeasuredRate
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          </do_all>
+          <else>
+            <debug_text text="'[XMultiplayer] no player ship, skipping tick'" filter="general" />
+          </else>
+        </do_if>
+      </actions>
+    </cue>
+
+    <!--
+      Writes $XMP.Json to the pipe via the SirNukes Named_Pipes API. On failure,
+      retries with exponential backoff (capped) and logs via debug_text; the pipe
+      being unavailable is expected while the agent process is not running yet.
+    -->
+    <cue name="XMP_Telemetry_WriteToPipe" instantiate="false">
+      <actions>
+        <do_all>
+          <signal_cue_instantly cue="md.Named_Pipes.Write" param="table[$pipe=$XMP.PipeName, $msg=$XMP.Json]" />
+        </do_all>
+      </actions>
+      <cues>
+        <!--
+          Assumption: md.Named_Pipes signals a write failure back with an error param.
+          Validate the exact signal name/shape in-game. Suspends the Tick cue for
+          $XMP.RetryDelayMs (via $XMP.PausedUntil, checked in XMP_Telemetry_Tick above)
+          and doubles the delay for the next failure, capped at 30s.
+        -->
+        <cue name="XMP_Telemetry_WriteFailed" instantiate="true">
+          <conditions>
+            <event_cue_signalled cue="md.Named_Pipes.OnWriteError" />
+          </conditions>
+          <actions>
+            <do_all>
+              <debug_text text="'[XMultiplayer] pipe write failed, backing off ' + $XMP.RetryDelayMs + 'ms'" filter="general" />
+              <set_value name="$XMP.PausedUntil" exact="player.age + $XMP.RetryDelayMs milliseconds" />
+              <set_value name="$XMP.RetryDelayMs" exact="min{value1=$XMP.RetryDelayMs * 2, value2=30000}" />
+            </do_all>
+          </actions>
+        </cue>
+
+        <!--
+          Assumption: md.Named_Pipes signals a successful write back (see file header).
+          Resets the backoff state so the next failure starts counting from the base
+          delay again, instead of continuing to grow from wherever it last left off.
+        -->
+        <cue name="XMP_Telemetry_WriteSucceeded" instantiate="true">
+          <conditions>
+            <event_cue_signalled cue="md.Named_Pipes.OnWriteSuccess" />
+          </conditions>
+          <actions>
+            <do_all>
+              <set_value name="$XMP.RetryDelayMs" exact="1000" />
+              <set_value name="$XMP.PausedUntil" exact="0" />
+            </do_all>
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+  </cues>
+</mdscript>

@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://xmultiplayer/protocol/v1.json",
+  "title": "XMultiplayer protocol v1",
+  "description": "Reference schema mirroring protocol/src/messages.ts. Not used for runtime validation (parseMessage in parse.ts is the source of truth) -- kept as documentation and for external tooling.",
+  "definitions": {
+    "vector3": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      }
+    },
+    "quaternion": {
+      "type": "object",
+      "required": ["qx", "qy", "qz", "qw"],
+      "properties": {
+        "qx": { "type": "number" },
+        "qy": { "type": "number" },
+        "qz": { "type": "number" },
+        "qw": { "type": "number" }
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "required": ["v", "seq", "ts", "type"],
+      "properties": {
+        "v": { "const": 1 },
+        "seq": { "type": "number" },
+        "ts": { "type": "number" },
+        "type": { "type": "string" }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["shipId", "position", "rotation", "velocity"],
+          "properties": {
+            "type": { "const": "state_update" },
+            "shipId": { "type": "string" },
+            "position": { "$ref": "#/definitions/vector3" },
+            "rotation": { "$ref": "#/definitions/quaternion" },
+            "velocity": { "$ref": "#/definitions/vector3" },
+            "mdRate": { "type": "number" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["objectId", "shipType", "owner"],
+          "properties": {
+            "type": { "const": "spawn" },
+            "objectId": { "type": "string" },
+            "shipType": { "type": "string" },
+            "loadout": { "type": "array", "items": { "type": "string" } },
+            "owner": { "type": "string" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["objectId"],
+          "properties": {
+            "type": { "const": "despawn" },
+            "objectId": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["targetId", "sourceId", "damage", "damageType"],
+          "properties": {
+            "type": { "const": "hit_report" },
+            "targetId": { "type": "string" },
+            "sourceId": { "type": "string" },
+            "damage": { "type": "number" },
+            "damageType": { "enum": ["hull", "shield"] }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["objectId", "hull", "shield"],
+          "properties": {
+            "type": { "const": "hp_state" },
+            "objectId": { "type": "string" },
+            "hull": { "type": "number" },
+            "shield": { "type": "number" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["sourceId", "weapon", "origin", "direction"],
+          "properties": {
+            "type": { "const": "fire_event" },
+            "sourceId": { "type": "string" },
+            "weapon": { "type": "string" },
+            "origin": { "$ref": "#/definitions/vector3" },
+            "direction": { "$ref": "#/definitions/vector3" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["action", "sessionCode"],
+          "properties": {
+            "type": { "const": "session" },
+            "action": { "enum": ["join", "leave", "ready", "countdown"] },
+            "sessionCode": { "type": "string" },
+            "playerName": { "type": "string" },
+            "countdownSeconds": { "type": "number" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["from", "text"],
+          "properties": {
+            "type": { "const": "chat" },
+            "from": { "type": "string" },
+            "text": { "type": "string" }
+          }
+        }
+      ]
+    }
+  ]
+}

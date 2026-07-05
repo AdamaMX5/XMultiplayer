@@ -1,0 +1,23 @@
+{
+  "name": "xmultiplayer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "X4: Foundations multiplayer via the modding pipeline (no engine access). See docs/PlanMod.md.",
+  "workspaces": [
+    "protocol",
+    "agent",
+    "server"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "coverage": "c8 npm test",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "c8": "^11.0.0",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
+  }
+}

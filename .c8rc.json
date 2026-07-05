@@ -1,0 +1,9 @@
+{
+  "all": true,
+  "src": ["protocol/src", "agent/src", "server/src"],
+  "include": ["protocol/src/**/*.ts", "agent/src/**/*.ts", "server/src/**/*.ts"],
+  "exclude": ["**/*.test.ts", "agent/src/index.ts", "agent/src/simulate.ts", "server/src/index.ts"],
+  "reporter": ["text", "text-summary"],
+  "extension": [".ts"],
+  "excludeAfterRemap": true
+}

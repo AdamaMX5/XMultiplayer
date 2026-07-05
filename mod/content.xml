@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<content id="xmultiplayer" name="XMultiplayer" description="Exports player ship telemetry over a Named Pipe for the XMultiplayer agent/relay chain (Arena Phase 1, milestone A1)." author="XMultiplayer" version="100" date="2026-07-05" save="false">
+  <!-- SirNukes Mod Support APIs provides the Named Pipe interface (md.Named_Pipes) this mod
+       relies on to talk to the external agent process. Steam Workshop dependency, not bundled. -->
+  <dependency id="sn_mod_support_apis" name="SirNukes Mod Support APIs" version="150" optional="false" />
+  <text language="44" name="XMultiplayer" description="Exports player ship telemetry over a Named Pipe for the XMultiplayer agent/relay chain." />
+</content>

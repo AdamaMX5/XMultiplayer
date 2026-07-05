@@ -54,7 +54,7 @@ Grundtypen (Versionierung von Anfang an einbauen: `"v": 1`):
 
 ## Phase 1 — Arena (PvP-Duell im leeren Sektor)
 
-**Ziel-Erlebnis:** Zwei Spieler verabreden sich, treffen sich in einem dedizierten Arena-Sektor,
+**Ziel-Erlebnis:** Zwei oder mehr Spieler verabreden sich, treffen sich in einem dedizierten Arena-Sektor,
 kämpfen mit eigenen (echten, verlierbaren) Schiffen. Late-Game-Geldabfluss als Feature:
 Wer Asgards verlieren kann, hat einen Grund für die zwanzigste Werft.
 
@@ -115,7 +115,7 @@ Wer Asgards verlieren kann, hat einen Grund für die zwanzigste Werft.
 
 - **Erfolg:** Zwei Spieler können sich zuverlässig sehen, umfliegen, beschießen und
   zerstören. Bewegung bei normalen Manövern glaubwürdig. Duell fühlt sich nach
-  "Geisterduell mit Spannung" an, nicht nach Diashow.
+  "Geisterduell mit Spannung" an, nicht nach Diashow. Auch mehrere Spieler sind mit jeder gegen jeden möglich 
 - **Erwartungsmanagement:** Elite-Dangerous-Dogfighting-Präzision ist NICHT das Ziel
   und per Mod nicht erreichbar. Das steht so auch im README.
 - **Abbruch/Pivot:** Wenn A2/A3 zeigen, dass die MD-Update-Rate unter ~3–5 Hz liegt
