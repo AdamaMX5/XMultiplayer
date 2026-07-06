@@ -9,15 +9,31 @@ Milestone A2: a dedicated Arena galaxy/sector/gamestart (`libraries/clusters.xml
 no factions/jobs/economy, plus proxy spawn/despawn and naive teleport-on-update for
 remote players (`md/XMP_Arena.xml`).
 
+Milestone A3: replaces the naive per-update teleport with Dead Reckoning --
+`aiscripts/XMP.ProxyPilot.xml` continuously flies each proxy toward an
+extrapolated target (last known position + velocity x elapsed time) with the
+engine's own flight controller and collision avoidance, only hard-teleporting
+("snapping") when the deviation from a fresh update is too large, or stopping
+entirely if no update has arrived for too long. Tuning knobs (extrapolation
+horizon, snap threshold, update timeout, retarget interval) are centralized in
+`XMP_Arena_TuningDefaults` (`md/XMP_Arena.xml`). The agent estimates one-way link
+latency per message and folds it into the extrapolation baseline, and now
+re-serializes every relay message canonically (only known fields, fixed order)
+before it ever reaches the pipe -- see `protocol/protocol.md` and
+`docs/A3-messprotokoll.md`.
+
 **Status: PLAUSIBLE, not VERIFIED.** This extension has not been loaded or run inside
 X4 (no game installation available in this development environment). The XML is
-checked to be syntactically valid, but the Mission Director semantics (cue timing,
-the exact SirNukes Named_Pipes API surface, and -- new risk in A2 -- whether MD can
-parse a received JSON string at all) are assumptions documented inline in
-`md/XMP_Telemetry.xml`/`md/XMP_Arena.xml` and in `docs/A1-messprotokoll.md`/
-`docs/A2-messprotokoll.md`. In-game validation is the first open task for both
-milestones; A2 in particular should not be considered functional until its JSON-
-parsing assumption is checked (see `docs/A2-messprotokoll.md` section 1).
+checked to be syntactically valid, but the Mission Director/AI-script semantics
+(cue timing, the exact SirNukes Named_Pipes API surface, whether MD can parse a
+received JSON string at all, and -- new risk in A3 -- the `<aiscript>` root shape,
+`move.to.position`, and `object.blackboard` as the MD/AI-script data channel) are
+assumptions documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
+`aiscripts/XMP.ProxyPilot.xml` and in `docs/A1-messprotokoll.md`/
+`docs/A2-messprotokoll.md`/`docs/A3-messprotokoll.md`. In-game validation is the
+first open task for all three milestones; A2's JSON-parsing assumption must be
+validated before A3 can be tested at all (no state_update data reaches the
+blackboard otherwise).
 
 ## Dependencies
 
@@ -62,3 +78,10 @@ achievable MD update rate -- the critical number for all of Phase 1 (PlanMod.md 
 proxy spawned/despawned per objectId, and a warning if a spawn arrives for an
 objectId that already has a proxy. The agent's 5-second stats also report
 `remoteForwarded`/`remoteDropped` counts for messages relayed down into the pipe.
+
+`XMP.ProxyPilot.xml` logs under a `[XMultiplayer][ProxyPilot]` prefix: a snap
+teleport (with the squared deviation that triggered it) and a "holding position"
+line when `$UpdateTimeoutSec` is exceeded. Frequent snaps or holds are a signal
+the tuning defaults (`XMP_Arena_TuningDefaults`) need adjusting for the observed
+latency/speeds, see `docs/A3-messprotokoll.md` (which also has the in-game
+measurement template and A2-vs-A3 comparison table).

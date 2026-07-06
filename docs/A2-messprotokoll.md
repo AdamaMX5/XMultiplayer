@@ -24,6 +24,13 @@ vanilla MD-Scripts breit belegt sind, konnte für diese spezifische String-Such-
 - [ ] Bestätigen: Existiert `find_string` (oder ein Äquivalent) in dieser Form?
 - [ ] Bestätigen: Existieren `.{substring:...}`, `.{tonumber}`, `.{replace:...}`
       als Wert-Postfix-Operationen auf Strings?
+- **Update (A3-Review):** Zwei konkrete Logikfehler in `XMP_Arena_ExtractField`s
+  Endpositions-Berechnung gefunden und behoben (unbedingtes `min()` mit
+  Nicht-gefunden-Sentinel `-1` beim letzten Feld eines Objekts; verschachtelte
+  Objektwerte wie `position` wurden am ersten INNEREN Komma statt am eigenen
+  Ende abgeschnitten). Details, Fix-Beschreibung und neue offene Fragen dazu in
+  `docs/A3-messprotokoll.md` Abschnitt 2.2 — die grundsätzliche Unsicherheit
+  über `find_string`/`.{substring:...}` selbst bleibt hier unverändert bestehen.
 - [ ] Falls NEIN: Entscheidung zwischen zwei Optionen fällt nach diesem ersten
       In-Game-Test von `XMP_Arena_ExtractField`, nicht vorher:
       - **Option A — ein Feld pro Pipe-Write:** Der Agent (`agent/src/index.ts`,

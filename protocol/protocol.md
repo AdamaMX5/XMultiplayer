@@ -120,6 +120,31 @@ line/frame they receive. It is hand-written (no `ajv`/schema library) because th
 message set is small and stable. `schema/v1.json` mirrors the same shapes as a
 JSON Schema for documentation/external tooling, but is not used at runtime.
 
+## Canonical re-serialization (A3)
+
+`serializeCanonical(msg)` in `src/canonical.ts` takes an already-`parseMessage`d
+object and rebuilds its JSON from scratch: only the fields that message type
+defines, in a fixed key order, nothing extra carried through. `parseMessage`
+validates required fields exist and are the right type, but does not strip
+unexpected additional properties -- `serializeCanonical` is what does that. The
+agent uses it (not the original raw line) for everything it writes into the pipe
+or caches for replay (`agent/src/pipeMessage.ts`, `agent/src/index.ts`), so that
+what MD's string-based field extractor (`XMP_Arena_ExtractField`) ever sees is
+built field-by-field from typed, validated data, never forwarded byte-for-byte
+from another player (closes the "decoy field" concern raised in the A2 security
+review, since a naive text search for `"name":` is only as trustworthy as the
+byte layout of the string it's searching).
+
+## Pipe-only fields (not part of this wire schema)
+
+The agent appends `linkLatencyMs` (an estimated, clamped, and EWMA-smoothed
+one-way transit delay per sender -- see `agent/src/latency.ts` and
+`agent/src/latencyTracker.ts`) to `state_update` lines specifically when writing
+them into the pipe (`agent/src/pipeMessage.ts`). This field only ever exists on
+that one hop (agent -> pipe); it is not part of `StateUpdateMessage` above and
+never crosses the WebSocket. MD reads it to backdate its extrapolation baseline
+-- see `docs/A3-messprotokoll.md`.
+
 ## Size limit
 
 `MAX_MESSAGE_BYTES` (`src/limits.ts`, currently 64 KiB) caps a single message.

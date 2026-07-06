@@ -31,8 +31,51 @@
         per PlanMod.md's explicit call-out of set_object_position as the naive-teleport
         action for A2; if the engine actually needs a separate rotation-setting action,
         that is the second thing to fix after the JSON-parsing assumption above.
+
+    Milestone A3 (Dead Reckoning): naive per-update teleport is replaced by writing
+    the latest known truth onto the proxy ship's blackboard and letting
+    aiscripts/XMP.ProxyPilot.xml continuously extrapolate and fly toward it; see
+    that file's header for the A3-specific assumptions (object.blackboard as the MD
+    to AI-script channel, move.to.position/move.stop, the aiscript root shape).
+    start_ai_script/stop_ai_script below are assumed action names for attaching/
+    detaching an AI-script to/from an object, and start_ai_script is assumed to take
+    nested <param name="..." value="..."/> elements to override the AI-script's own
+    defaults; unconfirmed like everything else here. Two more A3 additions:
+      - XMP_Arena_HandleSpawn now calls an assumed create_pilot/add_pilot action on
+        the new proxy before start_ai_script, in case an AI-script cannot fly a
+        ship that has no assigned NPC pilot; may turn out unnecessary, see
+        aiscripts/XMP.ProxyPilot.xml's header for the fuller reasoning.
+      - XMP_Arena_HandleStateUpdate reads an additional linkLatencyMs field the
+        agent appends to state_update lines specifically (agent/src/pipeMessage.ts,
+        not part of the WebSocket/session wire schema in protocol/), an estimate of
+        one-way transit delay for that message. The blackboard's recv-time is
+        backdated by this amount, so the AI-script's existing "elapsed = now - recv
+        time" extrapolation math automatically implements PlanMod.md A3's
+        "Position + Geschwindigkeitsvektor x Latenz" without needing separate
+        latency-specific logic in the AI-script itself.
   -->
   <cues>
+    <!--
+      Central tuning knobs for aiscripts/XMP.ProxyPilot.xml (PlanMod.md A3
+      "Tuning"), gathered here so they can be adjusted in one place without editing
+      the AI-script itself; see that file's header for what each one does. Passed
+      explicitly to start_ai_script in XMP_Arena_HandleSpawn below rather than
+      relying only on the AI-script's own <param> defaults.
+    -->
+    <cue name="XMP_Arena_TuningDefaults" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.DeadReckoningExtrapolationHorizonSec" exact="1.5" />
+          <set_value name="$XMP.DeadReckoningSnapThresholdMeters" exact="500" />
+          <set_value name="$XMP.DeadReckoningUpdateTimeoutSec" exact="5" />
+          <set_value name="$XMP.DeadReckoningRetargetIntervalSec" exact="0.3" />
+        </do_all>
+      </actions>
+    </cue>
+
     <!--
       Announces our own ship to the rest of the session once telemetry starts, so
       other clients know to spawn a proxy for us. Reuses XMP_Telemetry_WriteToPipe
@@ -112,6 +155,51 @@
       Extracts the raw JSON value for $XMP.ExtractKey out of $XMP.RxLine into
       $XMP.ExtractValue (as a string; callers convert to number themselves where
       needed). See the file header: this is the single most speculative cue here.
+
+      Bugs found and fixed across two A3 review rounds, all in how the value's
+      END position is determined and how it's turned into $XMP.ExtractValue:
+
+      1. Last-field problem: the original logic took min(nextCommaPos, nextBracePos)
+         unconditionally. When the extracted field is the LAST property in its
+         object (e.g. "owner" in a spawn message), there is no following comma, so
+         find_string's "not found" result (-1, assumed) was fed straight into min()
+         as if it were a real, very-early position, always winning and truncating
+         the value to nothing. Fixed by checking for -1 explicitly and falling back
+         to the brace position when no comma follows.
+
+      2. Nested-object problem: position/rotation/velocity values are themselves
+         JSON objects ("position":{"x":1,"y":2,"z":3}) with their OWN internal
+         commas. The unconditional next-comma search matched the first INNER comma
+         (e.g. between x and y) instead of the comma/brace that actually ends the
+         whole object, truncating $XMP.RxPositionJson etc. to a fragment like
+         '{"x":1', broken input for the sub-extraction that reads x/y/z out of
+         it afterwards. Fixed by detecting an object-valued field (its first
+         character is '{') and, for those, searching only for the matching closing
+         brace, never a comma; this protocol's nested objects never nest further
+         (only scalar fields inside), so a plain next-'}' search is exact. The
+         closing brace itself is included in the captured substring, since the
+         sub-extraction re-parses this exact string and needs its own trailing
+         "}" for the same last-field fix to apply to ITS last field (z/qw).
+
+      3. Quote-strip-undoes-fix-2 problem (found in the SECOND A3 review round):
+         the quote-stripping replace was applied unconditionally to whatever
+         span was captured, including the object branch's result. For a scalar
+         string value ("Alice") that correctly strips just its own surrounding
+         quotes, but for an object-valued span ({"x":10,"y":20,"z":30}) it ALSO
+         stripped the quotes around the nested key names, turning it into
+         {x:10,y:20,z:30}. The sub-extraction that reads x/y/z back out of that
+         span always searches for a QUOTED key ("x":), so it found nothing at
+         all, undoing fix 2 one line later and breaking 100% of position/
+         rotation/velocity data. Fixed by only applying the quote-strip in the
+         scalar branch; the object branch's span is used as-is, quotes intact.
+
+      Known, pre-existing, NOT fixed here (documented in docs/A3-messprotokoll.md):
+      a string VALUE that itself contains a literal '}' or ',' (e.g. a player name
+      like "{CoolClan} Alice") still truncates extraction early, since the
+      end-boundary search has no concept of quoted-string content; it just finds
+      the first '}'/',' character anywhere after the value start. Not exercised by
+      A1-A3 (no free-form player-supplied strings flow through yet); relevant from
+      A5 on once real player names/chat text do.
     -->
     <cue name="XMP_Arena_ExtractField" instantiate="false">
       <actions>
@@ -119,11 +207,33 @@
           <set_value name="$XMP.ExtractNeedle" exact="'&quot;' + $XMP.ExtractKey + '&quot;:'" />
           <find_string name="$XMP.ExtractKeyPos" exact="$XMP.RxLine" pattern="$XMP.ExtractNeedle" start="0" />
           <set_value name="$XMP.ExtractValueStart" exact="$XMP.ExtractKeyPos + $XMP.ExtractNeedle.length" />
-          <find_string name="$XMP.ExtractCommaPos" exact="$XMP.RxLine" pattern="','" start="$XMP.ExtractValueStart" />
-          <find_string name="$XMP.ExtractBracePos" exact="$XMP.RxLine" pattern="'}'" start="$XMP.ExtractValueStart" />
-          <set_value name="$XMP.ExtractEnd" exact="min{value1=$XMP.ExtractCommaPos, value2=$XMP.ExtractBracePos}" />
-          <set_value name="$XMP.ExtractValue"
-            exact="$XMP.RxLine.{substring: $XMP.ExtractValueStart, $XMP.ExtractEnd}.{replace: '&quot;', ''}" />
+
+          <do_if value="$XMP.RxLine.{substring: $XMP.ExtractValueStart, $XMP.ExtractValueStart + 1} == '{'">
+            <do_all>
+              <find_string name="$XMP.ExtractBracePos" exact="$XMP.RxLine" pattern="'}'" start="$XMP.ExtractValueStart" />
+              <set_value name="$XMP.ExtractEnd" exact="$XMP.ExtractBracePos + 1" />
+              <!-- Object branch: no quote-strip. The span (e.g. {"x":10,"y":20,"z":30})
+                   is used verbatim, so the sub-extraction's own quoted-key search
+                   ("x":, "y":, ...) still finds its needles. -->
+              <set_value name="$XMP.ExtractValue" exact="$XMP.RxLine.{substring: $XMP.ExtractValueStart, $XMP.ExtractEnd}" />
+            </do_all>
+            <else>
+              <do_all>
+                <find_string name="$XMP.ExtractCommaPos" exact="$XMP.RxLine" pattern="','" start="$XMP.ExtractValueStart" />
+                <find_string name="$XMP.ExtractBracePos" exact="$XMP.RxLine" pattern="'}'" start="$XMP.ExtractValueStart" />
+                <do_if value="$XMP.ExtractCommaPos == -1">
+                  <set_value name="$XMP.ExtractEnd" exact="$XMP.ExtractBracePos" />
+                  <else>
+                    <set_value name="$XMP.ExtractEnd" exact="min{value1=$XMP.ExtractCommaPos, value2=$XMP.ExtractBracePos}" />
+                  </else>
+                </do_if>
+                <!-- Scalar branch only: strip the value's own surrounding quotes
+                     (a quoted string becomes bare; a bare number is unaffected). -->
+                <set_value name="$XMP.ExtractValue"
+                  exact="$XMP.RxLine.{substring: $XMP.ExtractValueStart, $XMP.ExtractEnd}.{replace: '&quot;', ''}" />
+              </do_all>
+            </else>
+          </do_if>
         </do_all>
       </actions>
     </cue>
@@ -132,8 +242,10 @@
       Creates a proxy ship for a remote player's spawn and remembers it keyed by
       objectId, so later state_update/despawn messages for the same objectId can
       find it again. Naive placement at the local player's own position for now;
-      the very next state_update for this objectId will teleport it to the right
-      place (A3 replaces the teleport with Dead Reckoning).
+      the very next state_update for this objectId will move it toward the right
+      place. Since A3: also seeds the proxy's blackboard (so the AI-script's first
+      loop iteration has valid data, treating "no movement yet" as the initial
+      truth), assigns a pilot, and starts XMP.ProxyPilot.xml on it.
     -->
     <cue name="XMP_Arena_HandleSpawn" instantiate="false">
       <actions>
@@ -154,6 +266,30 @@
             <do_all>
               <create_ship name="$XMP.NewProxyShip" macro="$XMP.RxShipType" position="player.entity.position" owner="player" />
               <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="$XMP.NewProxyShip" />
+
+              <!-- Assumption (see file header): a proxy needs an assigned NPC pilot
+                   before an AI-script can fly it. Defensive; may be unnecessary. -->
+              <create_pilot name="$XMP.NewProxyPilot" ship="$XMP.NewProxyShip" race="argon" />
+
+              <!-- Seed the blackboard with the spawn placement itself and zero
+                   velocity, so Dead Reckoning starts from a valid, non-null state
+                   instead of waiting for the first state_update. -->
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetPosX" exact="$XMP.NewProxyShip.position.x" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetPosY" exact="$XMP.NewProxyShip.position.y" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetPosZ" exact="$XMP.NewProxyShip.position.z" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetVelX" exact="0" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetVelY" exact="0" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetVelZ" exact="0" />
+              <set_value name="$XMP.NewProxyShip.blackboard.$XMP_TargetRecvTime" exact="player.age" />
+
+              <!-- Params passed here override the AI-script's own <param> defaults;
+                   see XMP_Arena_TuningDefaults above for where these values live. -->
+              <start_ai_script name="XMP.ProxyPilot" object="$XMP.NewProxyShip">
+                <param name="$ExtrapolationHorizonSec" value="$XMP.DeadReckoningExtrapolationHorizonSec" />
+                <param name="$SnapThresholdMeters" value="$XMP.DeadReckoningSnapThresholdMeters" />
+                <param name="$UpdateTimeoutSec" value="$XMP.DeadReckoningUpdateTimeoutSec" />
+                <param name="$RetargetIntervalSec" value="$XMP.DeadReckoningRetargetIntervalSec" />
+              </start_ai_script>
               <debug_text text="'[XMultiplayer][Arena] spawned proxy for ' + $XMP.RxOwner + ' (objectId=' + $XMP.RxObjectId + ')'" filter="general" />
             </do_all>
             <else>
@@ -164,7 +300,12 @@
       </actions>
     </cue>
 
-    <!-- Removes a remote player's proxy (they disconnected, or the server told us to). -->
+    <!--
+      Removes a remote player's proxy (they disconnected, or the server told us to).
+      Stops the Dead Reckoning AI-script first; likely redundant (destroying the
+      object probably tears down its running scripts on its own) but cheap and
+      defensive against the assumption that it doesn't.
+    -->
     <cue name="XMP_Arena_HandleDespawn" instantiate="false">
       <actions>
         <do_all>
@@ -174,6 +315,7 @@
 
           <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
             <do_all>
+              <stop_ai_script name="XMP.ProxyPilot" object="$XMP.Proxies.{$XMP.RxObjectId}" />
               <destroy_object object="$XMP.Proxies.{$XMP.RxObjectId}" />
               <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="null" />
               <debug_text text="'[XMultiplayer][Arena] despawned proxy objectId=' + $XMP.RxObjectId" filter="general" />
@@ -184,11 +326,25 @@
     </cue>
 
     <!--
-      Naive teleport (A2 baseline, per PlanMod.md A2): moves and rotates the proxy
-      to exactly the received position/rotation on every update, no smoothing at
-      all. Expected to look rough at anything but very low relative speeds; that
-      rough baseline is the point (A2's "how bad is the jitter, really?" question),
-      replaced by Dead Reckoning extrapolation in A3.
+      Since A3: no longer teleports position directly (that was the A2 baseline).
+      Writes the latest known truth (position, velocity, receive time) onto the
+      proxy's blackboard; aiscripts/XMP.ProxyPilot.xml running on that ship picks
+      it up on its own next loop iteration and either extrapolates toward it or
+      snap-teleports if the deviation is too large (see that file's header).
+      Rotation is still applied immediately here, not extrapolated: PlanMod.md A3
+      only calls for extrapolating POSITION via the velocity vector, and a rotation
+      snap is far less visually jarring than a position teleport. Assumption on top
+      of the existing "set_object_position accepts position+rotation together" one
+      (see file header): passing only `rotation` without `position` still applies
+      just the rotation, leaving position untouched.
+
+      Also reads linkLatencyMs (added by the agent, agent/src/pipeMessage.ts, not
+      part of the WebSocket/session wire schema) and backdates the blackboard's
+      receive time by it, so the AI-script's "elapsed = now - recv time" math
+      automatically compensates for network transit delay as well as time elapsed
+      locally since (PlanMod.md A3 "Position + Geschwindigkeitsvektor x Latenz").
+      Falls back to 0 (no backdating) if the field is missing (e.g. an older
+      agent version), guarded by checking the extractor actually found it.
     -->
     <cue name="XMP_Arena_HandleStateUpdate" instantiate="false">
       <actions>
@@ -207,8 +363,28 @@
               <include_interrupt_actions ref="XMP_Arena_ExtractField" />
               <set_value name="$XMP.RxRotationJson" exact="$XMP.ExtractValue" />
 
-              <!-- Sub-extraction: position/rotation are nested objects, so we run the
-                   same field extractor again against just their substrings. -->
+              <set_value name="$XMP.ExtractKey" exact="'velocity'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxVelocityJson" exact="$XMP.ExtractValue" />
+
+              <!-- linkLatencyMs (see cue header): read here, before $XMP.RxLine
+                   gets reassigned to the position/rotation/velocity substrings
+                   below, and before $XMP.ExtractKeyPos gets overwritten by the
+                   next extraction call. Assumption: XMP_Arena_ExtractField's
+                   underlying find_string leaves $XMP.ExtractKeyPos at -1 when the
+                   key is not found at all (as opposed to throwing or erroring). -->
+              <set_value name="$XMP.ExtractKey" exact="'linkLatencyMs'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <do_if value="$XMP.ExtractKeyPos != -1">
+                <set_value name="$XMP.RxLinkLatencyMs" exact="$XMP.ExtractValue.{tonumber}" />
+                <else>
+                  <set_value name="$XMP.RxLinkLatencyMs" exact="0" />
+                </else>
+              </do_if>
+
+              <!-- Sub-extraction: position/rotation/velocity are nested objects, so
+                   we run the same field extractor again against just their
+                   substrings. -->
               <set_value name="$XMP.RxLine" exact="$XMP.RxPositionJson" />
               <set_value name="$XMP.ExtractKey" exact="'x'" />
               <include_interrupt_actions ref="XMP_Arena_ExtractField" />
@@ -234,10 +410,33 @@
               <include_interrupt_actions ref="XMP_Arena_ExtractField" />
               <set_value name="$XMP.RxRotQW" exact="$XMP.ExtractValue.{tonumber}" />
 
+              <set_value name="$XMP.RxLine" exact="$XMP.RxVelocityJson" />
+              <set_value name="$XMP.ExtractKey" exact="'x'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxVelX" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'y'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxVelY" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'z'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxVelZ" exact="$XMP.ExtractValue.{tonumber}" />
+
               <set_object_position
                 object="$XMP.Proxies.{$XMP.RxObjectId}"
-                position="table[x=$XMP.RxPosX, y=$XMP.RxPosY, z=$XMP.RxPosZ]"
                 rotation="table[x=$XMP.RxRotQX, y=$XMP.RxRotQY, z=$XMP.RxRotQZ, w=$XMP.RxRotQW]" />
+
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetPosX" exact="$XMP.RxPosX" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetPosY" exact="$XMP.RxPosY" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetPosZ" exact="$XMP.RxPosZ" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetVelX" exact="$XMP.RxVelX" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetVelY" exact="$XMP.RxVelY" />
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetVelZ" exact="$XMP.RxVelZ" />
+              <!-- Backdated by the estimated one-way link latency (see cue header
+                   above); this is what makes the AI-script's plain "now minus recv
+                   time" extrapolation implement "Position + Geschwindigkeitsvektor
+                   x Latenz" without any latency-specific code in the AI-script. -->
+              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_TargetRecvTime"
+                exact="player.age - ($XMP.RxLinkLatencyMs / 1000)" />
             </do_all>
             <else>
               <!-- We haven't seen a spawn for this objectId yet (e.g. we joined mid-session

@@ -67,7 +67,11 @@ function handleIncomingLine(line: string): void {
     console.log(`[sim] remote despawn ${msg.objectId}`);
   } else if (msg.type === "state_update") {
     const p = msg.position;
-    console.log(`[sim] remote pos ${msg.shipId} ${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`);
+    // linkLatencyMs is a pipe-only field (agent/src/pipeMessage.ts), not part of
+    // StateUpdateMessage's own schema, hence the loose read here.
+    const linkLatencyMs = (msg as { linkLatencyMs?: number }).linkLatencyMs;
+    const latencySuffix = linkLatencyMs !== undefined ? ` latency=${linkLatencyMs.toFixed(0)}ms` : "";
+    console.log(`[sim] remote pos ${msg.shipId} ${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}${latencySuffix}`);
   }
   // Other message types (chat, hit_report, ...) aren't relevant to this simulator yet.
 }

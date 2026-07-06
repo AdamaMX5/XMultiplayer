@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<aiscript name="XMP.ProxyPilot" purpose="med" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../libraries/aiscripts.xsd">
+  <!--
+    XMultiplayer proxy pilot: Dead Reckoning AI-script (Milestone A3). PLAUSIBLE,
+    not VERIFIED, same status as every other mod file so far, see
+    docs/A3-messprotokoll.md for the full assumption list and open-questions
+    checklist. Named XMP.ProxyPilot (dot-separated, not underscore) to match the
+    namespaced style real X4 AI-script names commonly use.
+
+    Purpose (PlanMod.md A3): fly a remote player's proxy ship toward a continuously
+    re-extrapolated target (last known position + velocity * elapsed time), instead
+    of teleporting it on every network update (the A2 baseline). Only the TARGET
+    changes on a network update; the engine's own flight controller is what produces
+    smooth, frame-accurate movement toward that target (Kollisionsvermeidung bleibt
+    aktiv, siehe "movement" unten; no collision-avoidance-disabling flag is passed).
+
+    HIGHEST-RISK/LEAST-CONFIDENT PARTS OF THIS FILE (beyond the general "PLAUSIBLE,
+    not VERIFIED" status shared with the MD files):
+      - The <aiscript> root shape itself: whether a bare <params>/<init>/<do_while>
+        structure (as used here) is valid for a simple standalone movement script,
+        or whether X4 requires wrapping the main loop in <attention>/<properties>
+        (a pattern more commonly seen in reactive/interrupt AI-scripts). Simplest
+        structure chosen deliberately to minimize invented surface area.
+      - Whether a proxy ship needs an assigned NPC pilot before an AI-script can fly
+        it at all, or whether an AI-script can control the hull directly regardless
+        of crew. XMP_Arena_HandleSpawn (XMP_Arena.xml) now calls an assumed
+        create_pilot/add_pilot action before start_ai_script, purely defensively;
+        it may turn out to be unnecessary (e.g. if create_ship's macro already
+        implies a default crew for combat-capable ships), in which case removing it
+        is the simplification to make first.
+      - move.to.position as the movement action name/shape, and move.stop (used for
+        the update-timeout case below) likewise.
+      - Whether re-issuing move.to.position every retarget interval updates the
+        ship's current move order in place, or queues a new one behind it (which
+        would make the ship's flight path lag further and further behind reality).
+        If it queues, the fix is to call move.stop immediately before each re-issue.
+      - object.blackboard as the MD <-> AI-script data channel (see "Data channel"
+        below); assumed to exist and be readable/writable from both script types,
+        since MD variables ($XMP.* in XMP_Arena.xml) are not otherwise visible here.
+
+    Data channel: mod/md/XMP_Arena.xml's XMP_Arena_HandleStateUpdate writes the
+    latest known truth onto the proxy ship's OWN blackboard (not into an MD-side
+    table), specifically because blackboard is the one channel this script and MD
+    can both plausibly reach: $XMP_TargetPosX/Y/Z, $XMP_TargetVelX/Y/Z,
+    $XMP_TargetRecvTime (game time the truth was received, already backdated by the
+    agent's estimated one-way link latency; see XMP_Arena.xml's header comment
+    for the "Position + Geschwindigkeitsvektor x Latenz" reasoning). This script
+    reads them off "this" (the ship it is running on).
+
+    Snap vs. fly decision: on each loop iteration, if $XMP_TargetRecvTime changed
+    since this script last looked (i.e. a new update arrived), compare "this"'s
+    actual current position to the freshly received true position. If the squared
+    distance exceeds $SnapThresholdMeters^2, hard-teleport (set_object_position)
+    instead of flying; covers reconnects, long update gaps, or the proxy having
+    drifted off course after being blocked by collision avoidance for a while.
+    Squared distance is compared (not the real distance) purely to avoid needing an
+    assumed sqrt primitive; mathematically equivalent for a greater-than comparison.
+
+    Update-timeout decision (distinct from the extrapolation horizon below): if
+    NO update has arrived for longer than $UpdateTimeoutSec, this is no longer "a
+    bit stale, keep extrapolating" but "the link is probably down"; flying further
+    off a minutes-old data point would be actively misleading, so movement is
+    stopped instead (move.stop) and the proxy holds its last position until either
+    a fresh update or a despawn arrives.
+
+    Tuning parameters (PlanMod.md A3 "Tuning"), overridable at start_ai_script time
+    from XMP_Arena.xml, defaults chosen for a S/M-class dogfight-speed ship:
+      - $ExtrapolationHorizonSec (default 1.5s): elapsed time since the last update
+        is capped at this value before extrapolating, so a proxy doesn't keep flying
+        further and further from its last known heading between updates. Also
+        implicitly limits how far a single high-velocity (boost) update can
+        extrapolate before the next real update arrives and corrects it.
+      - $SnapThresholdMeters (default 500m): see "Snap vs. fly decision" above.
+      - $UpdateTimeoutSec (default 5s): see "Update-timeout decision" above. Longer
+        than $ExtrapolationHorizonSec on purpose: the horizon caps a single
+        extrapolation step, the timeout is the much longer "give up entirely" cutoff.
+      - $RetargetIntervalSec (default 0.3s): how often this script re-evaluates and
+        re-issues the move order. Deliberately much slower than the 10Hz network
+        rate; the engine's own flight model is what has to look smooth frame to
+        frame, this loop only ever needs to nudge the target often enough that the
+        ship doesn't visibly overshoot a stale point.
+
+    Known, accepted limitation (PlanMod.md A3 "Verhalten bei Boost/harten Drehungen"):
+    extrapolation assumes constant velocity between updates, so a hard turn or a
+    boost/deceleration right after the last update we know about will show up as a
+    brief, visible mispredict, corrected either by the next real update or (if bad
+    enough) by the snap threshold above. Not solvable without a proper motion model;
+    accepted per PlanMod.md 0.4/1.3 expectation management.
+  -->
+  <params>
+    <param name="$ExtrapolationHorizonSec" default="1.5" />
+    <param name="$SnapThresholdMeters" default="500" />
+    <param name="$UpdateTimeoutSec" default="5" />
+    <param name="$RetargetIntervalSec" default="0.3" />
+  </params>
+
+  <init>
+    <do_all>
+      <!-- -1 guarantees the first loop iteration treats whatever is on the
+           blackboard (set once at spawn time, see XMP_Arena_HandleSpawn) as new. -->
+      <set_value name="$LastSeenRecvTime" exact="-1" />
+      <set_value name="$IsStopped" exact="false" />
+    </do_all>
+  </init>
+
+  <do_while value="true">
+    <do_all>
+      <do_if value="this.blackboard.$XMP_TargetRecvTime != null and this.blackboard.$XMP_TargetRecvTime != $LastSeenRecvTime">
+        <do_all>
+          <set_value name="$DeltaX" exact="this.position.x - this.blackboard.$XMP_TargetPosX" />
+          <set_value name="$DeltaY" exact="this.position.y - this.blackboard.$XMP_TargetPosY" />
+          <set_value name="$DeltaZ" exact="this.position.z - this.blackboard.$XMP_TargetPosZ" />
+          <set_value name="$DeviationSq" exact="$DeltaX * $DeltaX + $DeltaY * $DeltaY + $DeltaZ * $DeltaZ" />
+          <do_if value="$DeviationSq &gt; $SnapThresholdMeters * $SnapThresholdMeters">
+            <do_all>
+              <set_object_position
+                object="this"
+                position="table[x=this.blackboard.$XMP_TargetPosX, y=this.blackboard.$XMP_TargetPosY, z=this.blackboard.$XMP_TargetPosZ]" />
+              <debug_text text="'[XMultiplayer][ProxyPilot] snap teleport, deviation_sq=' + $DeviationSq" filter="general" />
+            </do_all>
+          </do_if>
+          <set_value name="$LastSeenRecvTime" exact="this.blackboard.$XMP_TargetRecvTime" />
+          <set_value name="$IsStopped" exact="false" />
+        </do_all>
+      </do_if>
+
+      <do_if value="this.blackboard.$XMP_TargetRecvTime != null">
+        <do_all>
+          <set_value name="$SinceLastUpdate" exact="player.age - this.blackboard.$XMP_TargetRecvTime" />
+          <!--
+            do_if/else structure note: the true-branch below is a single <do_all>
+            (containing a nested do_if with NO else of its own), so that <else>'s
+            immediately preceding sibling is always a <do_all>, never a closed
+            <do_if> element, matching the pattern used everywhere else in this
+            codebase. An earlier version nested the "not $IsStopped" do_if directly
+            as the outer do_if's true-branch with <else> as its next sibling; that
+            reads as "else pairs with the outer do_if" by XML nesting, but X4's
+            actual do_if/else pairing (per the A3 review) attaches <else> to
+            whichever do_if is its nearest PRECEDING SIBLING in document order,
+            here that was the inner "not $IsStopped" do_if, not the outer one.
+            Effect of that bug: once stopped, every later iteration re-entered the
+            (wrongly paired) "else" and flew off stale data again, while still
+            logging "holding position" from the one-time transition; the log
+            would have lied about what the ship was actually doing.
+          -->
+          <do_if value="$SinceLastUpdate &gt; $UpdateTimeoutSec">
+            <do_all>
+              <do_if value="not $IsStopped">
+                <do_all>
+                  <move.stop />
+                  <set_value name="$IsStopped" exact="true" />
+                  <debug_text text="'[XMultiplayer][ProxyPilot] no update for ' + $SinceLastUpdate + 's, holding position'" filter="general" />
+                </do_all>
+              </do_if>
+            </do_all>
+            <else>
+              <do_all>
+                <!-- A fresh update arrived after a timeout (or none happened yet):
+                     make sure we're not left thinking we're still stopped. -->
+                <set_value name="$IsStopped" exact="false" />
+                <set_value name="$Elapsed" exact="min{value1=$SinceLastUpdate, value2=$ExtrapolationHorizonSec}" />
+                <set_value name="$ExtrapolatedX" exact="this.blackboard.$XMP_TargetPosX + this.blackboard.$XMP_TargetVelX * $Elapsed" />
+                <set_value name="$ExtrapolatedY" exact="this.blackboard.$XMP_TargetPosY + this.blackboard.$XMP_TargetVelY * $Elapsed" />
+                <set_value name="$ExtrapolatedZ" exact="this.blackboard.$XMP_TargetPosZ + this.blackboard.$XMP_TargetVelZ * $Elapsed" />
+                <!-- No collision-avoidance-disabling attribute passed here on
+                     purpose: PlanMod.md A3 requires the AI-script's own obstacle
+                     avoidance to stay active, so this simply relies on the
+                     action's default behavior. -->
+                <move.to.position position="table[x=$ExtrapolatedX, y=$ExtrapolatedY, z=$ExtrapolatedZ]" />
+              </do_all>
+            </else>
+          </do_if>
+        </do_all>
+      </do_if>
+    </do_all>
+    <wait exact="$RetargetIntervalSec seconds" />
+  </do_while>
+</aiscript>
