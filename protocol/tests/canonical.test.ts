@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseMessage } from "../src/parse.js";
 import { serializeCanonical } from "../src/canonical.js";
+import { simulateMdExtractField } from "./helpers/mdExtractFieldSimulation.js";
 
 const base = { v: 1 as const, seq: 1, ts: 1_720_000_000_000 };
 
@@ -47,7 +48,16 @@ test("roundtrip parse -> serialize -> parse is stable for every message type", (
       velocity: { x: 4, y: 5, z: 6 },
       mdRate: 9.8,
     },
-    spawn: { ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", loadout: ["a", "b"] },
+    spawn: {
+      ...base,
+      type: "spawn",
+      objectId: "ship-1",
+      shipType: "ship_arg_s_fighter_01_a_macro",
+      owner: "Alice",
+      loadout: ["a", "b"],
+      maxHull: 120,
+      maxShield: 80,
+    },
     despawn: { ...base, type: "despawn", objectId: "ship-1", reason: "disconnect" },
     hit_report: { ...base, type: "hit_report", targetId: "ship-1", sourceId: "ship-2", damage: 42, damageType: "shield" },
     hp_state: { ...base, type: "hp_state", objectId: "ship-1", hull: 100, shield: 50 },
@@ -77,6 +87,36 @@ test("omits optional fields entirely when absent, rather than serializing them a
   if (!parsed.ok) return;
   const canonical = serializeCanonical(parsed.message);
   assert.equal(canonical.includes("reason"), false);
+});
+
+test("spawn: maxHull/maxShield (A4) are included when present, omitted (not null) when absent", () => {
+  const withBoth = parseMessage(
+    JSON.stringify({
+      ...base,
+      type: "spawn",
+      objectId: "ship-1",
+      shipType: "ship_arg_s_fighter_01_a_macro",
+      owner: "Alice",
+      maxHull: 150,
+      maxShield: 60,
+    })
+  );
+  assert.equal(withBoth.ok, true);
+  if (withBoth.ok) {
+    const canonical = JSON.parse(serializeCanonical(withBoth.message));
+    assert.equal(canonical.maxHull, 150);
+    assert.equal(canonical.maxShield, 60);
+  }
+
+  const withNeither = parseMessage(
+    JSON.stringify({ ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice" })
+  );
+  assert.equal(withNeither.ok, true);
+  if (withNeither.ok) {
+    const canonical = serializeCanonical(withNeither.message);
+    assert.equal(canonical.includes("maxHull"), false);
+    assert.equal(canonical.includes("maxShield"), false);
+  }
 });
 
 test("session: includes both optional fields when both are present, neither when both are absent", () => {
@@ -111,37 +151,16 @@ test("session: includes both optional fields when both are present, neither when
 //
 // mod/md/XMP_Arena.xml's XMP_Arena_ExtractField (the MD-side field reader) does not
 // parse JSON -- it does a naive linear string search for the first `"<key>":` it can
-// find, then reads until whatever ends the value. This function reproduces the
-// CURRENT (post-A3-review, round 2) algorithm faithfully, including all three fixes:
-// (1) fall back to the brace position when no comma follows (last-field-in-object),
-// (2) detect an object-valued field (its first character is '{') and search only for
-// the matching '}', never a comma (nested position/rotation/velocity), and
-// (3) only quote-strip the scalar branch's result -- the object branch's span is
-// returned exactly as captured, so its own nested "key": quotes survive for the
-// sub-extraction that reads x/y/z etc. back out of it. See the cue's own header
-// comment in XMP_Arena.xml for the full write-up.
-function simulateMdExtractField(rxLine: string, key: string): { found: boolean; value: string | null; endIndex: number } {
-  const needle = `"${key}":`;
-  const keyPos = rxLine.indexOf(needle);
-  if (keyPos === -1) return { found: false, value: null, endIndex: NaN };
-  const valueStart = keyPos + needle.length;
-  const isObjectValue = rxLine.slice(valueStart, valueStart + 1) === "{";
-  let end: number;
-  if (isObjectValue) {
-    const bracePos = rxLine.indexOf("}", valueStart);
-    end = bracePos + 1; // include the closing brace, mirroring the cue's own comment
-  } else {
-    const commaPos = rxLine.indexOf(",", valueStart);
-    const bracePos = rxLine.indexOf("}", valueStart);
-    end = commaPos === -1 ? bracePos : Math.min(commaPos, bracePos);
-  }
-  if (end < 0) return { found: true, value: null, endIndex: end };
-  const raw = rxLine.slice(valueStart, end);
-  // Fix 3: the quote-strip only applies to the scalar branch now. The object
-  // branch's span keeps its nested keys' quotes intact.
-  const value = isObjectValue ? raw : raw.replace(/"/g, "");
-  return { found: true, value, endIndex: end };
-}
+// find, then reads until whatever ends the value. simulateMdExtractField (imported
+// above, see tests/helpers/mdExtractFieldSimulation.ts -- extracted into its own file
+// per the A4 review so it isn't buried in this one) reproduces that algorithm
+// faithfully, including all three A3 fixes: (1) fall back to the brace position when
+// no comma follows (last-field-in-object), (2) detect an object-valued field (its
+// first character is '{') and search only for the matching '}', never a comma
+// (nested position/rotation/velocity), and (3) only quote-strip the scalar branch's
+// result -- the object branch's span is returned exactly as captured, so its own
+// nested "key": quotes survive for the sub-extraction that reads x/y/z etc. back out
+// of it. See the cue's own header comment in XMP_Arena.xml for the full write-up.
 
 test("a decoy \"type\" pattern embedded inside a legitimate string field can never reach the MD extractor unescaped", () => {
   // Attack shape from the A2 security review: a field value engineered to contain a
@@ -334,4 +353,46 @@ test("full field-by-field extraction of a real state_update line: scalar fields 
   assert.equal(extractVectorField("position", "z").value, "3");
   assert.equal(extractVectorField("rotation", "qw").value, "0.8660254");
   assert.equal(extractVectorField("velocity", "z").value, "8.5");
+});
+
+// A4 review requirement: the new hit_report/hp_state extractions used by
+// mod/md/XMP_Arena.xml's XMP_Arena_OnProxyAttacked and XMP_Arena_HandleHpState must
+// be exercised against the same Node mirror as state_update was above, not just
+// asserted to "probably work" by analogy.
+
+test("full field-by-field extraction of a real hit_report line", () => {
+  const original = {
+    ...base,
+    type: "hit_report" as const,
+    targetId: "ship-victim",
+    sourceId: "ship-attacker",
+    damage: 42.5,
+    damageType: "shield" as const,
+  };
+  const parsed = parseMessage(JSON.stringify(original));
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const line = serializeCanonical(parsed.message);
+
+  assert.equal(simulateMdExtractField(line, "targetId").value, "ship-victim");
+  assert.equal(simulateMdExtractField(line, "sourceId").value, "ship-attacker");
+  assert.equal(simulateMdExtractField(line, "damage").value, "42.5");
+  // damageType is the last field in the hit_report schema (canonical.ts) -- exercises
+  // the last-field fix (bug 1) for this message type specifically.
+  assert.equal(simulateMdExtractField(line, "damageType").value, "shield", "last field of the line must still extract correctly");
+});
+
+test("full field-by-field extraction of a real hp_state line, including hull/shield of exactly 0", () => {
+  const original = { ...base, type: "hp_state" as const, objectId: "ship-victim", hull: 0, shield: 0 };
+  const parsed = parseMessage(JSON.stringify(original));
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const line = serializeCanonical(parsed.message);
+
+  assert.equal(simulateMdExtractField(line, "objectId").value, "ship-victim");
+  assert.equal(simulateMdExtractField(line, "hull").value, "0");
+  // shield is the last field in the hp_state schema -- same last-field concern as
+  // above, plus specifically checking that a value of "0" (not a truthy-looking
+  // number) doesn't trip up the "not found" (-1) sentinel handling from bug 1.
+  assert.equal(simulateMdExtractField(line, "shield").value, "0", "a zero value must not be confused with the not-found sentinel");
 });

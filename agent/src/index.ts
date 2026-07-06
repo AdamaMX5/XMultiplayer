@@ -30,6 +30,15 @@ const latencyTracker = new LatencyTracker();
  */
 const knownSpawns = new Map<string, string>();
 
+/**
+ * Mirrors knownSpawns' keys as a Set (A4): decideRelay's orphan filter needs a
+ * cheap membership check ("do we actually have a spawn for this shipId/targetId")
+ * on every incoming state_update/hit_report, and rebuilding a Set from
+ * knownSpawns.keys() on every single message would be wasteful. Kept in exact
+ * lockstep with knownSpawns at both of its mutation points below.
+ */
+const knownObjectIds = new Set<string>();
+
 const ws = new ReconnectingWebSocket({
   url: config.serverUrl,
   onOpen: () => {
@@ -95,14 +104,18 @@ function handleLine(line: string): void {
  * Forwards a message received from the relay server (about another session member)
  * down into the game via the pipe. Trust boundary since A2: this data comes from
  * another player, not our own game, so it is validated (parseMessage) AND filtered
- * (decideRelay, e.g. the shipType whitelist on spawn) before ever reaching the pipe.
- * Since A3: what actually gets written/cached is buildPipeLine's canonical,
- * re-serialized form (protocol/src/canonical.ts), never the original raw line --
- * closes the JSON "decoy field" concern from the A2 security review, since MD's
- * string-based field extractor now only ever sees bytes this agent constructed
- * from validated, typed data. state_update also gets a smoothed link-latency
- * estimate attached (latencyTracker), reset whenever that sender's spawn/despawn
- * is seen so a respawn/reconnect doesn't inherit stale history.
+ * (decideRelay, e.g. the shipType whitelist on spawn, and since A4 the Arena
+ * position/velocity bounds and the orphan-objectId filter, both in
+ * agent/src/relayFilter.ts) before ever reaching the pipe. Since A3: what actually
+ * gets written/cached is buildPipeLine's canonical, re-serialized form
+ * (protocol/src/canonical.ts), never the original raw line -- closes the JSON
+ * "decoy field" concern from the A2 security review, since MD's string-based field
+ * extractor now only ever sees bytes this agent constructed from validated, typed
+ * data. state_update also gets a smoothed link-latency estimate attached
+ * (latencyTracker), reset whenever that sender's spawn/despawn is seen so a
+ * respawn/reconnect doesn't inherit stale history; the orphan filter above is what
+ * keeps that tracker's internal map from growing unboundedly for ids that were
+ * never legitimately spawned.
  */
 function handleRemoteMessage(line: string): void {
   const result = parseMessage(line);
@@ -111,7 +124,7 @@ function handleRemoteMessage(line: string): void {
     relayStats.remoteDropped += 1;
     return;
   }
-  const decision = decideRelay(result.message);
+  const decision = decideRelay(result.message, knownObjectIds);
   if (!decision.forward) {
     console.warn(`[agent] dropped message from relay: ${decision.reason}`);
     relayStats.remoteDropped += 1;
@@ -123,8 +136,14 @@ function handleRemoteMessage(line: string): void {
 
   const linkLatencyMs = msg.type === "state_update" ? latencyTracker.update(msg.shipId, estimateLatencyMs(msg.ts)) : undefined;
   const pipeLine = buildPipeLine(msg, linkLatencyMs);
-  if (msg.type === "spawn") knownSpawns.set(msg.objectId, pipeLine);
-  if (msg.type === "despawn") knownSpawns.delete(msg.objectId);
+  if (msg.type === "spawn") {
+    knownSpawns.set(msg.objectId, pipeLine);
+    knownObjectIds.add(msg.objectId);
+  }
+  if (msg.type === "despawn") {
+    knownSpawns.delete(msg.objectId);
+    knownObjectIds.delete(msg.objectId);
+  }
 
   if (pipe.write(pipeLine)) {
     relayStats.remoteForwarded += 1;

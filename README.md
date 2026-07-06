@@ -39,11 +39,12 @@ Sitzungsmitglieder; er ist ab Milestone A4 zusätzlich HP-Autorität für den Ka
 ## Repo-Struktur
 
 ```
-/mod/       X4-Extension (content.xml, md/) - Telemetrie-Export, später Proxy-Spawning
+/mod/       X4-Extension (content.xml, md/, aiscripts/) - Telemetrie, Proxy-Spawning/Despawn,
+            Dead Reckoning, seit A4 Kampf (lokale Unverwundbarkeit, Treffer-Erkennung, hp_state)
 /agent/     Node.js-Agent (Named-Pipe-Server, WebSocket-Client, Simulator für Tests ohne X4)
-/server/    Node.js-Relay-Server (Sessions, später HP-Autorität)
+/server/    Node.js-Relay-Server (Sessions, seit A4 HP-Autorität für den Kampf)
 /protocol/  Geteiltes Nachrichtenprotokoll v1 (TS-Typen + JSON-Schema + Validierung)
-/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1-messprotokoll.md)
+/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1- bis A4-messprotokoll.md)
 ```
 
 ## Setup
@@ -87,6 +88,12 @@ Für den vollen A2-Beweis (Proxy-Spawn + Teleport zwischen zwei Spielern) zwei
 Agent/Simulator-Paare mit unterschiedlichem `--pipe-name` gegen denselben
 Relay-Server starten; jede Simulator-Instanz loggt dann `[sim] remote spawn ...`
 und `[sim] remote pos ...` für die jeweils andere.
+
+Seit A4 zeigt derselbe Zwei-Instanzen-Aufbau auch die Kampf-Kette ohne X4: die
+zweite Instanz zusätzlich mit `--hit-target sim-A --damage 100 --damage-type hull`
+starten (genau tödlich gegen die Standard-100-Hull) -- beide Seiten loggen dann
+das server-autoritative `[sim] hp_state ...` (inkl. `(DESTROYED)`-Suffix), gefolgt
+von `[sim] remote despawn ... (reason=destroyed)` bei der getroffenen Instanz.
 
 ### Mod installieren
 

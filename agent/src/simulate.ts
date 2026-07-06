@@ -16,6 +16,18 @@ import { NdjsonSplitter } from "./ndjson.js";
  * server) and logs it readably. Run two instances with different --pipe-name and
  * --object-id against the same agent/server pair to see the full A2 chain locally:
  * each instance's log shows the other's spawn and position updates.
+ *
+ * Since A4: pass --hit-target <objectId> (plus optionally --damage/--damage-type)
+ * to fire a single hit_report at that objectId shortly after connecting (see
+ * --hit-delay-ms), and every hp_state/destroyed-despawn this instance receives is
+ * logged too -- so the whole combat chain (attacker's hit_report -> server ->
+ * hp_state on both sides -> destruction despawn once hull reaches 0) is
+ * demonstrable with two simulator instances and no X4 install, the same way A2's
+ * spawn/state_update chain already is. Typical demo: start instance A with
+ * --object-id ship-a, instance B with --object-id ship-b
+ * --hit-target ship-a --damage 100 --damage-type hull (exactly lethal against the
+ * default 100 starting hull) -- A's log shows its own hp_state hull:0 followed by
+ * a remote despawn (reason=destroyed) for itself.
  */
 function argValue(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -27,6 +39,11 @@ const pipeName = argValue(argv, "--pipe-name") ?? "xmultiplayer";
 const shipType = argValue(argv, "--ship") ?? "ship_arg_s_fighter_01_a_macro";
 const owner = argValue(argv, "--owner") ?? "simulator";
 const objectId = argValue(argv, "--object-id") ?? `sim-${randomUUID()}`;
+// A4: optional one-shot hit_report, see the file header for the two-instance demo.
+const hitTarget = argValue(argv, "--hit-target");
+const hitDamage = Number(argValue(argv, "--damage") ?? "25");
+const hitDamageType = argValue(argv, "--damage-type") === "shield" ? "shield" : "hull";
+const hitDelayMs = Number(argValue(argv, "--hit-delay-ms") ?? "2000");
 
 if (!isKnownShipMacro(shipType)) {
   console.error(`[simulate] --ship "${shipType}" is not on the known ship macro whitelist, refusing to start.`);
@@ -44,6 +61,10 @@ const socket = connect(path, () => {
   console.log("[simulate] connected, announcing spawn and streaming fake telemetry at 10 Hz");
   sendSpawn(socket);
   setInterval(() => sendTick(socket), 100);
+  if (hitTarget) {
+    console.log(`[simulate] will report a ${hitDamage} ${hitDamageType} hit on ${hitTarget} in ${hitDelayMs}ms`);
+    setTimeout(() => sendHitReport(socket, hitTarget), hitDelayMs);
+  }
 });
 
 const splitter = new NdjsonSplitter();
@@ -64,7 +85,10 @@ function handleIncomingLine(line: string): void {
   if (msg.type === "spawn") {
     console.log(`[sim] remote spawn ${msg.objectId} ${msg.shipType} (owner=${msg.owner})`);
   } else if (msg.type === "despawn") {
-    console.log(`[sim] remote despawn ${msg.objectId}`);
+    // A4: reason distinguishes a combat kill from a disconnect/manual despawn --
+    // see server.ts's destroyObject vs broadcastDespawns.
+    const reasonSuffix = msg.reason ? ` (reason=${msg.reason})` : "";
+    console.log(`[sim] remote despawn ${msg.objectId}${reasonSuffix}`);
   } else if (msg.type === "state_update") {
     const p = msg.position;
     // linkLatencyMs is a pipe-only field (agent/src/pipeMessage.ts), not part of
@@ -72,12 +96,43 @@ function handleIncomingLine(line: string): void {
     const linkLatencyMs = (msg as { linkLatencyMs?: number }).linkLatencyMs;
     const latencySuffix = linkLatencyMs !== undefined ? ` latency=${linkLatencyMs.toFixed(0)}ms` : "";
     console.log(`[sim] remote pos ${msg.shipId} ${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}${latencySuffix}`);
+  } else if (msg.type === "hp_state") {
+    // A4: the server-authoritative outcome of a hit_report, sent to every session
+    // member including whoever sent the hit_report -- this instance sees it
+    // whether it was the attacker or the victim (objectId tells them apart).
+    const destroyedSuffix = msg.hull <= 0 ? " (DESTROYED)" : "";
+    console.log(`[sim] hp_state ${msg.objectId} hull=${msg.hull} shield=${msg.shield}${destroyedSuffix}`);
   }
-  // Other message types (chat, hit_report, ...) aren't relevant to this simulator yet.
+  // Other message types (chat, ...) aren't relevant to this simulator yet.
+  // hit_report never arrives here at all -- the server resolves it into hp_state,
+  // it never gets echoed back raw (protocol.md, "hit_report" direction).
 }
 
 function sendSpawn(socket: Socket): void {
   const message = { v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId, shipType, owner };
+  socket.write(JSON.stringify(message) + "\n");
+}
+
+/**
+ * A4: reports a single hit on targetId, sourced from this instance's own objectId
+ * (A4 ownership authority requires sourceId to belong to the sender -- this
+ * instance already announced objectId via sendSpawn above). One-shot, not
+ * periodic: enough to demonstrate the chain without needing a real hit-detection
+ * loop, which is exactly the piece this simulator can't stand in for (see the
+ * client-side hit detection weakness, docs/A4-messprotokoll.md).
+ */
+function sendHitReport(socket: Socket, targetId: string): void {
+  const message = {
+    v: 1,
+    type: "hit_report",
+    seq: seq++,
+    ts: Date.now(),
+    targetId,
+    sourceId: objectId,
+    damage: hitDamage,
+    damageType: hitDamageType,
+  };
+  console.log(`[simulate] sending hit_report: ${hitDamage} ${hitDamageType} damage on ${targetId}`);
   socket.write(JSON.stringify(message) + "\n");
 }
 

@@ -137,3 +137,68 @@ test("takeSpawnedObjectIds() is idempotent: a second call for the same member re
   sessions.takeSpawnedObjectIds("a", "arena-1");
   assert.deepEqual(sessions.takeSpawnedObjectIds("a", "arena-1"), []);
 });
+
+// --- A4: ownership authority (ownerOf) and spawn cap (hasOtherActiveSpawn) ---
+
+test("ownerOf() returns the memberId that recorded a spawn for that objectId", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice", '{"objectId":"ship-alice"}');
+
+  assert.equal(sessions.ownerOf("ship-alice"), "a");
+});
+
+test("ownerOf() returns undefined for an objectId nobody has spawned", () => {
+  const sessions = new SessionManager();
+  assert.equal(sessions.ownerOf("never-spawned"), undefined);
+});
+
+test("ownerOf() forgets an object once removeSpawn() or takeSpawnedObjectIds() has taken it", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice", '{"objectId":"ship-alice"}');
+
+  sessions.removeSpawn("arena-1", "ship-alice");
+  assert.equal(sessions.ownerOf("ship-alice"), undefined);
+});
+
+test("removeSpawn() does not affect a DIFFERENT objectId owned by the same member", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-1", '{"objectId":"ship-1"}');
+  sessions.recordSpawn("arena-1", "a", "ship-2", '{"objectId":"ship-2"}');
+
+  sessions.removeSpawn("arena-1", "ship-1");
+  assert.equal(sessions.ownerOf("ship-1"), undefined);
+  assert.equal(sessions.ownerOf("ship-2"), "a");
+});
+
+test("hasOtherActiveSpawn() is false for a member with no spawns at all", () => {
+  const sessions = new SessionManager();
+  assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice"), false);
+});
+
+test("hasOtherActiveSpawn() is false when re-checking the SAME objectId the member already owns (respawn is allowed)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice", '{"objectId":"ship-alice"}');
+
+  assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice"), false);
+});
+
+test("hasOtherActiveSpawn() is true when the member already owns a DIFFERENT objectId (spawn cap)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}');
+
+  assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice-2"), true);
+});
+
+test("hasOtherActiveSpawn() no longer trips once the member's prior spawn was removed", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}');
+  sessions.removeSpawn("arena-1", "ship-alice-1");
+
+  assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice-2"), false);
+});

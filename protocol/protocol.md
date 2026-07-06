@@ -2,10 +2,13 @@
 
 Wire format: one JSON object per message, newline-delimited (NDJSON) on the Named Pipe
 (game <-> agent) and as individual text frames on the WebSocket (agent <-> relay server).
-The relay server forwards messages verbatim between session members; besides
+The relay server forwards most messages verbatim between session members; besides
 `type: "session"` (join/leave bookkeeping), it also inspects `type: "spawn"` since A2,
 to replay previously spawned proxies to late joiners and to despawn a member's
-proxies when they disconnect (see `server/src/sessionManager.ts`).
+proxies when they disconnect (see `server/src/sessionManager.ts`). Since A4 it is also
+the HP authority (see below): `type: "hit_report"` is the one message type that is
+never forwarded raw -- it is consumed entirely server-side and turned into an
+`hp_state` broadcast instead (see `server/src/hpTracker.ts`).
 
 **Correlation:** a `spawn.objectId` and subsequent `state_update.shipId` for the same
 ship must be the same value -- that's how a receiver matches an incoming position
@@ -28,19 +31,29 @@ reasoning (gimbal lock and wrap-around avoidance for the A3 Dead Reckoning extra
 ## Message types
 
 ### `state_update`
-**Direction:** game -> agent -> server -> other clients in the session.
+**Direction:** game -> agent -> server -> other clients in the session. Since A4 the
+server only accepts/forwards a `state_update` whose `shipId` the sender actually
+owns (rejects both spoofed IDs belonging to someone else and orphaned IDs with no
+recorded spawn at all); separately, the AGENT (not the server) also rejects one
+whose `position`/`velocity` fall outside plausible bounds before it ever reaches the
+pipe (`agent/src/arenaBounds.ts`, `decideRelay`).
 **Purpose:** Periodic export of one ship's kinematic state (A1: the local player's own ship).
 
 | Field | Type | Notes |
 |---|---|---|
 | `shipId` | string | Stable identifier for the ship (A1: the sending player's ship). |
-| `position` | `{x,y,z}` | World-space position. |
+| `position` | `{x,y,z}` | World-space position. Agent-side sanity bound: `ARENA_BOUNDS_METERS` (`agent/src/arenaBounds.ts`). |
 | `rotation` | `{qx,qy,qz,qw}` | Orientation quaternion. |
-| `velocity` | `{x,y,z}` | Velocity vector, world-space. |
+| `velocity` | `{x,y,z}` | Velocity vector, world-space. Agent-side sanity bound: `MAX_VELOCITY_MPS`. |
 | `mdRate` | number (optional) | MD's own measured tick rate in Hz for this cue, so receivers can distinguish network jitter from a slow MD tick (PlanMod.md 0.3). |
 
 ### `spawn`
-**Direction:** server -> clients (A2+; type exists from A1 for forward compatibility).
+**Direction:** client -> server -> other clients (A2+; type exists from A1 for forward
+compatibility). Since A4, the server also enforces ownership here: a client may only
+spawn an `objectId` nobody else already owns (re-spawning your OWN previous
+`objectId` is fine and replaces it, see `despawn`/session lifecycle), and only one
+active spawn per client at a time (a second, *different* `objectId` is rejected --
+respawn by re-sending the SAME `objectId` instead).
 **Purpose:** Announce a new remote object (typically a proxy ship for another player).
 
 | Field | Type | Notes |
@@ -49,9 +62,15 @@ reasoning (gimbal lock and wrap-around avoidance for the A3 Dead Reckoning extra
 | `shipType` | string | Ship macro/type name. |
 | `loadout` | string[] (optional) | Short-form loadout (weapon/equipment macro names). |
 | `owner` | string | Owning player's identifier/name. |
+| `maxHull` | number (optional, A4) | Starting hull for the server's HP authority (`server/src/hpTracker.ts`). Falls back to `DEFAULT_HULL` (`src/combat.ts`) if absent. |
+| `maxShield` | number (optional, A4) | Starting shield, same fallback pattern (`DEFAULT_SHIELD`). |
 
 ### `despawn`
-**Direction:** server -> clients.
+**Direction:** server -> clients under normal operation (disconnect, or a
+server-triggered destruction, see `hp_state` below). If a client ever sends one
+itself (not part of the normal flow, but parsed the same way), the server since A4
+only accepts it, and forwards it, if the sender actually owns that `objectId` --
+same ownership check as `state_update`/`fire_event` below.
 **Purpose:** Announce removal of a previously spawned object.
 
 | Field | Type | Notes |
@@ -60,28 +79,40 @@ reasoning (gimbal lock and wrap-around avoidance for the A3 Dead Reckoning extra
 | `reason` | string (optional) | Free-form reason (`"session_end"`, `"destroyed"`, `"disconnect"`, ...). |
 
 ### `hit_report`
-**Direction:** client -> server (A4).
-**Purpose:** Client-authoritative report of a hit registered locally against a proxy.
+**Direction:** client -> server only (A4). Never forwarded to other clients raw --
+see `hp_state` below for what they receive instead.
+**Purpose:** Client-detected report of a hit registered locally against a proxy. This
+is the client-side hit *detection* PlanMod.md A4 calls out as a known, accepted
+weakness: at latencies above ~100ms a target can visibly be "hit around a corner"
+that no longer matches its position in the reporting client's own game.
 
 | Field | Type | Notes |
 |---|---|---|
-| `targetId` | string | Object that was hit. |
-| `sourceId` | string | Object/weapon that caused the hit. |
-| `damage` | number | Raw damage value, pre-mitigation. |
-| `damageType` | `"hull"` \| `"shield"` | Which pool the damage applies to. |
+| `targetId` | string | Object that was hit. Naturally NOT owned by the sender (you report hits on someone else's ship) -- the one field in this message the ownership check does not apply to. |
+| `sourceId` | string | Object/weapon that caused the hit. Must be owned by the sender; a `hit_report` claiming a `sourceId` you don't own is rejected server-side (A4 ownership authority). |
+| `damage` | number | Raw, untrusted damage value, pre-mitigation. Must be a finite, strictly positive number (`isValidDamageClaim`, `src/hpTracker.ts`) -- zero, negative (which would otherwise silently *heal* the target, since regeneration does not exist in v1), or non-finite values are rejected outright, before the value is even clamped. Passing that check, it is further clamped to `MAX_DAMAGE_PER_HIT` (`src/combat.ts`, currently 1000) so a single hit_report can never claim to instantly destroy an arbitrarily healthy ship. |
+| `damageType` | `"hull"` \| `"shield"` | Resolution rule (A4): `"shield"` damage is absorbed by the shield pool first, with any leftover ("overflow") spilling into hull once the shield is fully depleted -- the normal case for most weapon fire. `"hull"` damage bypasses the shield pool entirely and always applies straight to hull, representing a hull-piercing/shield-ignoring hit. See `docs/A4-messprotokoll.md` section 1 for the reasoning behind this split. |
 
 ### `hp_state`
 **Direction:** server -> clients (A4).
-**Purpose:** Authoritative HP state after the server resolves a `hit_report`.
+**Purpose:** Authoritative HP state after the server resolves a `hit_report`. Sent to
+every session member, including whoever sent the `hit_report` (the attacker needs the
+confirmed outcome too, not just the victim). A freshly spawned object starts at
+`DEFAULT_HULL`/`DEFAULT_SHIELD` (`src/combat.ts`, currently 100/100 for every ship
+type -- a deliberate V1 simplification, see `docs/A4-messprotokoll.md` section 1).
+`hull` reaching 0 additionally triggers a `despawn` (`reason: "destroyed"`) for the
+same `objectId`, since a destroyed ship is also no longer a valid spawn to replay to
+late joiners.
 
 | Field | Type | Notes |
 |---|---|---|
 | `objectId` | string | Object the state applies to. |
-| `hull` | number | Current hull value. |
-| `shield` | number | Current shield value. |
+| `hull` | number | Current hull value, never negative (clamped at 0 server-side). |
+| `shield` | number | Current shield value, never negative (clamped at 0 server-side). |
 
 ### `fire_event`
-**Direction:** client -> server -> other clients (A4).
+**Direction:** client -> server -> other clients (A4). `sourceId` must be owned by
+the sender (A4 ownership authority), same rule as `state_update`/`despawn`.
 **Purpose:** Cosmetic-only weapon fire notification, to drive fake projectiles on proxies.
 Actual damage is never derived from this message -- only from `hit_report`/`hp_state`.
 
@@ -91,6 +122,24 @@ Actual damage is never derived from this message -- only from `hit_report`/`hp_s
 | `weapon` | string | Weapon macro name. |
 | `origin` | `{x,y,z}` | Muzzle/origin position at fire time. |
 | `direction` | `{x,y,z}` | Fire direction vector. |
+
+## Server-side validation (trust boundary), summary
+
+Every field above documents its own specific check; this is just the index. Since
+A2, the server treats every client-supplied message as untrusted input, not merely
+data to relay; A4 substantially expands that:
+
+| Check | Where | Rejects |
+|---|---|---|
+| Ship macro whitelist | `agent/src/relayFilter.ts` (`decideRelay`) | `spawn` with a `shipType` outside `SHIP_MACRO_WHITELIST`. |
+| Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`), `agent/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
+| Orphan filter | `agent/src/relayFilter.ts` (`decideRelay`) | `state_update`/`hit_report` for a `shipId`/`targetId` with no known spawn -- also what keeps the agent's `LatencyTracker` map bounded. |
+| Ownership authority | `server/src/server.ts`, `server/src/sessionManager.ts` (`ownerOf`) | `spawn`/`state_update`/`despawn`/`fire_event` referencing an `objectId` the sender does not own. |
+| Spawn cap | `server/src/sessionManager.ts` (`hasOtherActiveSpawn`) | A second, different `objectId` spawned by a client that already has one active. |
+| Damage validation | `server/src/hpTracker.ts` (`isValidDamageClaim`, `clampDamage`) | Non-finite, zero, or negative `damage`; clamps anything above `MAX_DAMAGE_PER_HIT`. |
+| Message size | `protocol/src/parse.ts`, `agent/src/ndjson.ts`, the relay's `maxPayload` | Any message over `MAX_MESSAGE_BYTES`. |
+
+See `docs/A4-messprotokoll.md` for the reasoning behind each of the A4 additions.
 
 ### `session`
 **Direction:** client <-> server.

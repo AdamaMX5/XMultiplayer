@@ -98,6 +98,8 @@ function validateSpawn(obj: Fields): ParseResult {
   if (!isString(obj, "shipType")) return fail("spawn.shipType must be a string");
   if (!isString(obj, "owner")) return fail("spawn.owner must be a string");
   if (!isStringArray(obj.loadout)) return fail("spawn.loadout must be an array of strings if present");
+  if (!isOptionalNumber(obj, "maxHull")) return fail("spawn.maxHull must be a number if present");
+  if (!isOptionalNumber(obj, "maxShield")) return fail("spawn.maxShield must be a number if present");
   return ok(obj as unknown as SpawnMessage);
 }
 

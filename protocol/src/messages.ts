@@ -57,6 +57,17 @@ export interface SpawnMessage extends EnvelopeBase {
   /** Short-form loadout, e.g. weapon/equipment macro names. Full loadout sync is a later milestone. */
   loadout?: string[];
   owner: string;
+  /**
+   * Starting hull/shield for the server's HP authority (A4, server/src/hpTracker.ts).
+   * Optional so older senders/tests still parse; the server falls back to
+   * DEFAULT_HULL/DEFAULT_SHIELD (src/combat.ts) when absent. Letting the SENDER
+   * (the mod, which knows the actual shipType) supply these is a step toward
+   * per-shiptype HP instead of one fixed value for every ship -- still a client-
+   * supplied value, so the server does not treat it as more trustworthy than any
+   * other hit_report field, just as the starting point HP is measured from.
+   */
+  maxHull?: number;
+  maxShield?: number;
 }
 
 export interface DespawnMessage extends EnvelopeBase {

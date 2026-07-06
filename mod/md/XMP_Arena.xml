@@ -53,6 +53,47 @@
         time" extrapolation math automatically implements PlanMod.md A3's
         "Position + Geschwindigkeitsvektor x Latenz" without needing separate
         latency-specific logic in the AI-script itself.
+
+    Milestone A4 (Kampf, PlanMod.md A4): client-side hit detection, server-authoritative
+    HP, cosmetic fake projectiles. New assumed actions/events, all unconfirmed like
+    everything else in this file, see docs/A4-messprotokoll.md for the full list:
+      - set_object_invulnerable: called on every proxy at spawn time. A proxy is
+        purely a local visual representation of a REAL ship living in another
+        player's game, so it must never take or deal "real" local damage: the
+        server is the only authority on what actually happens to it.
+      - event_object_attacked (unscoped, fires universe-wide): the local hit
+        detection hook. Assumed to still fire even for an invulnerable object (the
+        object not being harmable locally is exactly why we need a separate
+        notification instead of watching its hull/shield for changes; those never
+        move). $XMP.ProxyWireIdByGameId.{event.object.id} is a reverse lookup
+        (game object id -> wire objectId, the mirror of $XMP.Proxies) populated at
+        spawn time, since event.object is a game object reference, not our wire id.
+      - event_object_fired (scoped to player.entity): the local "I just fired my
+        weapon" hook, used to build the outgoing fire_event so other clients can
+        play a cosmetic effect on our proxy in their games.
+      - set_object_hull / set_object_shield: apply the server-authoritative
+        hp_state to the player's own real ship (a materially consequential
+        operation on the one thing in this whole mod that "really" matters).
+      - destroy_object's `explosion` attribute (assumed boolean, defaulting to
+        false/silent as already used by XMP_Arena_HandleDespawn since A2): A4
+        passes explosion="true" specifically for a combat kill (hp_state hull <= 0),
+        so a "player disconnected" despawn and a "ship was destroyed" despawn look
+        different to everyone watching, per PlanMod.md A4's "kontrollierte
+        Zerstörungssequenz".
+      - fire_weapon_cosmetic: plays a visual/audio weapon effect on a proxy with no
+        damage component. Deliberately does NOT reproduce the reported origin/
+        direction exactly (fires from the proxy's own current position/orientation
+        instead); a documented simplification to avoid another layer of nested
+        JSON sub-extraction for a purely cosmetic effect; revisit if the visual
+        mismatch looks wrong in-game.
+
+    KNOWN, ACCEPTED WEAKNESS (PlanMod.md A4, explicitly not solved for V1): hit
+    detection is client-side (whoever's local game registers the hit reports it),
+    so at latencies above roughly 100ms a target can visibly be "hit around a
+    corner" it had already turned past by the time the attacker's client saw the
+    hit locally. No server-side lag compensation exists or is planned for V1; see
+    docs/A4-messprotokoll.md and PlanMod.md 0.4/1.3 for the accepted-limitations
+    framing this follows.
   -->
   <cues>
     <!--
@@ -72,6 +113,15 @@
           <set_value name="$XMP.DeadReckoningSnapThresholdMeters" exact="500" />
           <set_value name="$XMP.DeadReckoningUpdateTimeoutSec" exact="5" />
           <set_value name="$XMP.DeadReckoningRetargetIntervalSec" exact="0.3" />
+          <!-- A4: sent as spawn.maxHull/maxShield (XMP_Arena_AnnounceSpawn below) so
+               the server's HP authority (server/src/hpTracker.ts) starts this ship
+               at the same values the mod itself considers "full health". Mirrors
+               protocol/src/combat.ts's DEFAULT_HULL/DEFAULT_SHIELD (100/100);
+               there is no shared source between MD and TS, so keep these two
+               numbers in sync by hand if either changes. Flat values for every
+               ship type in v1, not yet read from the ship's actual macro stats. -->
+          <set_value name="$XMP.CombatDefaultMaxHull" exact="100" />
+          <set_value name="$XMP.CombatDefaultMaxShield" exact="100" />
         </do_all>
       </actions>
     </cue>
@@ -80,7 +130,12 @@
       Announces our own ship to the rest of the session once telemetry starts, so
       other clients know to spawn a proxy for us. Reuses XMP_Telemetry_WriteToPipe
       (XMP_Telemetry.xml) for the actual write/retry/backoff handling, so this cue
-      only has to build the JSON payload.
+      only has to build the JSON payload. Since A4, also sends maxHull/maxShield
+      (XMP_Arena_TuningDefaults above) so the server's HP authority initializes
+      this ship's HP from the same "full health" values the mod itself uses,
+      rather than falling back to protocol/src/combat.ts's DEFAULT_HULL/
+      DEFAULT_SHIELD (which happen to be the same numbers today, but the field
+      exists precisely so that no longer has to hold once per-shiptype HP exists).
     -->
     <cue name="XMP_Arena_AnnounceSpawn" instantiate="true">
       <conditions>
@@ -94,6 +149,8 @@
                 + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
                 + ',&quot;shipType&quot;:&quot;' + player.entity.macro.name + '&quot;'
                 + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
+                + ',&quot;maxHull&quot;:' + $XMP.CombatDefaultMaxHull
+                + ',&quot;maxShield&quot;:' + $XMP.CombatDefaultMaxShield
                 + '}'" />
             <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
           </do_all>
@@ -147,6 +204,15 @@
           <do_if value="$XMP.RxType == 'state_update'">
             <include_interrupt_actions ref="XMP_Arena_HandleStateUpdate" />
           </do_if>
+          <do_if value="$XMP.RxType == 'hp_state'">
+            <include_interrupt_actions ref="XMP_Arena_HandleHpState" />
+          </do_if>
+          <do_if value="$XMP.RxType == 'fire_event'">
+            <include_interrupt_actions ref="XMP_Arena_HandleFireEvent" />
+          </do_if>
+          <!-- Anything else (e.g. hit_report, which only ever flows client -> server,
+               never back down to a client) is silently ignored: unknown/irrelevant
+               commands are dropped, not treated as an error (defensive parsing). -->
         </do_all>
       </actions>
     </cue>
@@ -200,6 +266,14 @@
       the first '}'/',' character anywhere after the value start. Not exercised by
       A1-A3 (no free-form player-supplied strings flow through yet); relevant from
       A5 on once real player names/chat text do.
+
+      IF YOU CHANGE THE LOGIC BELOW: protocol/tests/helpers/mdExtractFieldSimulation.ts
+      is a hand-maintained Node port of this exact algorithm (no shared source,
+      since MD isn't runnable outside X4 and so can't be imported/tested directly).
+      Update
+      that file in lockstep, or protocol/tests/canonical.test.ts's extraction tests
+      (including the A4 hit_report/hp_state ones) silently stop reflecting what this
+      cue actually does.
     -->
     <cue name="XMP_Arena_ExtractField" instantiate="false">
       <actions>
@@ -266,10 +340,19 @@
             <do_all>
               <create_ship name="$XMP.NewProxyShip" macro="$XMP.RxShipType" position="player.entity.position" owner="player" />
               <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="$XMP.NewProxyShip" />
+              <!-- Reverse lookup (game object -> wire objectId), needed by
+                   XMP_Arena_OnProxyAttacked (A4): a combat event exposes the game
+                   object that was hit, not our own wire-protocol id for it. -->
+              <set_value name="$XMP.ProxyWireIdByGameId.{$XMP.NewProxyShip.id}" exact="$XMP.RxObjectId" />
 
               <!-- Assumption (see file header): a proxy needs an assigned NPC pilot
                    before an AI-script can fly it. Defensive; may be unnecessary. -->
               <create_pilot name="$XMP.NewProxyPilot" ship="$XMP.NewProxyShip" race="argon" />
+
+              <!-- A4: a proxy is a purely local visual stand-in for a REAL ship in
+                   another player's game; it must never take (or deal) "real" local
+                   damage, only the server-authoritative hp_state applies. -->
+              <set_object_invulnerable object="$XMP.NewProxyShip" value="true" />
 
               <!-- Seed the blackboard with the spawn placement itself and zero
                    velocity, so Dead Reckoning starts from a valid, non-null state
@@ -301,10 +384,11 @@
     </cue>
 
     <!--
-      Removes a remote player's proxy (they disconnected, or the server told us to).
-      Stops the Dead Reckoning AI-script first; likely redundant (destroying the
-      object probably tears down its running scripts on its own) but cheap and
-      defensive against the assumption that it doesn't.
+      Removes a remote player's proxy (they disconnected, the server told us to, or,
+      since A4, their ship was destroyed in combat). Teardown itself is shared with
+      XMP_Arena_HandleHpState via XMP_Arena_DestroyProxy, since a combat kill and a
+      disconnect/manual despawn need the exact same cleanup (AI-script, reverse
+      lookup, Proxies table), differing only in whether an explosion plays.
     -->
     <cue name="XMP_Arena_HandleDespawn" instantiate="false">
       <actions>
@@ -315,9 +399,9 @@
 
           <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
             <do_all>
-              <stop_ai_script name="XMP.ProxyPilot" object="$XMP.Proxies.{$XMP.RxObjectId}" />
-              <destroy_object object="$XMP.Proxies.{$XMP.RxObjectId}" />
-              <set_value name="$XMP.Proxies.{$XMP.RxObjectId}" exact="null" />
+              <set_value name="$XMP.DestroyObjectId" exact="$XMP.RxObjectId" />
+              <set_value name="$XMP.DestroyExplosion" exact="false" />
+              <include_interrupt_actions ref="XMP_Arena_DestroyProxy" />
               <debug_text text="'[XMultiplayer][Arena] despawned proxy objectId=' + $XMP.RxObjectId" filter="general" />
             </do_all>
           </do_if>
@@ -445,6 +529,189 @@
           </do_if>
         </do_all>
       </actions>
+    </cue>
+
+    <!--
+      A4: shared proxy teardown, used by both XMP_Arena_HandleDespawn (disconnect/
+      manual despawn, no explosion) and XMP_Arena_HandleHpState (combat kill, with
+      explosion). Callers set $XMP.DestroyObjectId (wire objectId) and
+      $XMP.DestroyExplosion (true/false) before including this cue.
+    -->
+    <cue name="XMP_Arena_DestroyProxy" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.DestroyGameId" exact="$XMP.Proxies.{$XMP.DestroyObjectId}.id" />
+          <stop_ai_script name="XMP.ProxyPilot" object="$XMP.Proxies.{$XMP.DestroyObjectId}" />
+          <destroy_object object="$XMP.Proxies.{$XMP.DestroyObjectId}" explosion="$XMP.DestroyExplosion" />
+          <set_value name="$XMP.Proxies.{$XMP.DestroyObjectId}" exact="null" />
+          <set_value name="$XMP.ProxyWireIdByGameId.{$XMP.DestroyGameId}" exact="null" />
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      A4: applies a server-authoritative hp_state to whichever local representation
+      of that objectId we have. Two cases:
+        - Our OWN ship (objectId == player.entity.id): a materially real change to
+          the player's actual ship, since the server round-trip is what confirmed
+          it actually happened (client-side hit detection only ever REPORTS a hit,
+          never resolves it; see PlanMod.md A4's accepted client-side-hit-
+          detection weakness, documented in the file header and
+          docs/A4-messprotokoll.md).
+        - A remote player's proxy: the proxy is invulnerable (XMP_Arena_HandleSpawn),
+          so there is no "real" hull/shield to update on it; the value is tracked on
+          its blackboard only for possible future display purposes (no health bar
+          exists yet). Either way, hull reaching 0 triggers the destruction
+          sequence via XMP_Arena_DestroyProxy (proxy) or a direct destroy_object
+          (own ship).
+    -->
+    <cue name="XMP_Arena_HandleHpState" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'objectId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxObjectId" exact="$XMP.ExtractValue" />
+
+          <set_value name="$XMP.ExtractKey" exact="'hull'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxHull" exact="$XMP.ExtractValue.{tonumber}" />
+
+          <set_value name="$XMP.ExtractKey" exact="'shield'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxShield" exact="$XMP.ExtractValue.{tonumber}" />
+
+          <do_if value="player.entity.exists and $XMP.RxObjectId == player.entity.id">
+            <do_all>
+              <set_object_hull object="player.entity" exact="$XMP.RxHull" />
+              <set_object_shield object="player.entity" exact="$XMP.RxShield" />
+              <do_if value="$XMP.RxHull &lt;= 0">
+                <do_all>
+                  <destroy_object object="player.entity" explosion="true" />
+                  <debug_text text="'[XMultiplayer][Arena] our own ship was destroyed (server-confirmed)'" filter="general" />
+                </do_all>
+              </do_if>
+            </do_all>
+            <else>
+              <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
+                <do_all>
+                  <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_DisplayHull" exact="$XMP.RxHull" />
+                  <set_value name="$XMP.Proxies.{$XMP.RxObjectId}.blackboard.$XMP_DisplayShield" exact="$XMP.RxShield" />
+                  <do_if value="$XMP.RxHull &lt;= 0">
+                    <do_all>
+                      <set_value name="$XMP.DestroyObjectId" exact="$XMP.RxObjectId" />
+                      <set_value name="$XMP.DestroyExplosion" exact="true" />
+                      <include_interrupt_actions ref="XMP_Arena_DestroyProxy" />
+                      <debug_text text="'[XMultiplayer][Arena] proxy objectId=' + $XMP.RxObjectId + ' destroyed (server-confirmed)'" filter="general" />
+                    </do_all>
+                  </do_if>
+                </do_all>
+              </do_if>
+            </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      A4: cosmetic-only. Plays a fake weapon effect on the corresponding proxy so
+      it visually looks like it's firing back; never applies any damage locally
+      (real damage only ever arrives via hp_state). Silently does nothing if we
+      don't have a proxy for sourceId (e.g. a state_update/spawn race, or the
+      shooter despawned between firing and this arriving).
+    -->
+    <cue name="XMP_Arena_HandleFireEvent" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'sourceId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxObjectId" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.Proxies.{$XMP.RxObjectId}.exists">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'weapon'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxWeapon" exact="$XMP.ExtractValue" />
+              <fire_weapon_cosmetic object="$XMP.Proxies.{$XMP.RxObjectId}" weapon="$XMP.RxWeapon" />
+            </do_all>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      A4: local hit detection. Fires (assumption, see file header) whenever ANY
+      object in the universe is attacked, including an invulnerable one, which is
+      exactly why this exists instead of watching hull/shield for changes (those
+      never move on an invulnerable proxy). Filters to objects we actually track as
+      proxies via the reverse lookup populated in XMP_Arena_HandleSpawn, then
+      reports the hit to the server; the server (not this client) decides what
+      actually happens to the target's HP.
+    -->
+    <cue name="XMP_Arena_OnProxyAttacked" instantiate="true">
+      <conditions>
+        <event_object_attacked />
+      </conditions>
+      <actions>
+        <do_if value="$XMP.ProxyWireIdByGameId.{event.object.id}.exists">
+          <do_all>
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;hit_report&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;targetId&quot;:&quot;' + $XMP.ProxyWireIdByGameId.{event.object.id} + '&quot;'
+                + ',&quot;sourceId&quot;:&quot;' + player.entity.id + '&quot;'
+                + ',&quot;damage&quot;:' + event.param
+                + ',&quot;damageType&quot;:&quot;' + event.param2 + '&quot;'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Arena_OnProxyAttacked_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      A4: local outgoing fire detection, scoped to our own ship only. Builds the
+      fire_event other clients use to play a cosmetic effect on our proxy in their
+      games (XMP_Arena_HandleFireEvent). Never carries any damage information;
+      damage only ever flows via hit_report/hp_state, this is purely for the other
+      side's eyes.
+    -->
+    <cue name="XMP_Arena_OnOwnWeaponFired" instantiate="true">
+      <conditions>
+        <event_object_fired object="player.entity" />
+      </conditions>
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship">
+          <do_all>
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;fire_event&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;sourceId&quot;:&quot;' + player.entity.id + '&quot;'
+                + ',&quot;weapon&quot;:&quot;' + event.param + '&quot;'
+                + ',&quot;origin&quot;:{&quot;x&quot;:' + player.entity.position.x + ',&quot;y&quot;:' + player.entity.position.y + ',&quot;z&quot;:' + player.entity.position.z + '}'
+                + ',&quot;direction&quot;:{&quot;x&quot;:' + event.param2.x + ',&quot;y&quot;:' + event.param2.y + ',&quot;z&quot;:' + event.param2.z + '}'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Arena_OnOwnWeaponFired_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
     </cue>
   </cues>
 </mdscript>

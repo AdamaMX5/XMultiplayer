@@ -21,6 +21,9 @@ export class SessionManager {
   private spawnsBySession = new Map<string, Map<string, string>>();
   // memberId -> the objectIds that member has spawned, so a disconnect can despawn them.
   private spawnsByMember = new Map<string, Set<string>>();
+  // objectId -> the memberId that spawned it, so a single object (e.g. destroyed in
+  // combat, A4) can be un-recorded without touching that member's OTHER spawns.
+  private ownerByObjectId = new Map<string, string>();
 
   join(sessionCode: string, member: SessionMember): void {
     this.leave(member.id); // a client can only be in one session at a time
@@ -51,6 +54,12 @@ export class SessionManager {
     return [...members.values()].filter((m) => m.id !== exceptMemberId);
   }
 
+  /** All members of a session, nobody excluded (e.g. an hp_state must reach the attacker too, not just "others"). */
+  membersOf(sessionCode: string): SessionMember[] {
+    const members = this.sessions.get(sessionCode);
+    return members ? [...members.values()] : [];
+  }
+
   sessionCount(): number {
     return this.sessions.size;
   }
@@ -63,6 +72,7 @@ export class SessionManager {
     const owned = this.spawnsByMember.get(memberId) ?? new Set<string>();
     owned.add(objectId);
     this.spawnsByMember.set(memberId, owned);
+    this.ownerByObjectId.set(objectId, memberId);
   }
 
   /** Raw spawn messages currently known for a session, e.g. to replay to a newly joined member. */
@@ -77,7 +87,49 @@ export class SessionManager {
     this.spawnsByMember.delete(memberId);
     if (!owned) return [];
     const bySession = this.spawnsBySession.get(sessionCode);
-    for (const objectId of owned) bySession?.delete(objectId);
+    for (const objectId of owned) {
+      bySession?.delete(objectId);
+      this.ownerByObjectId.delete(objectId);
+    }
     return [...owned];
+  }
+
+  /**
+   * Forgets a single spawned object's record (e.g. destroyed in combat, A4),
+   * without touching the owning member's other spawns -- unlike
+   * takeSpawnedObjectIds, which is for when the whole MEMBER leaves.
+   */
+  removeSpawn(sessionCode: string, objectId: string): void {
+    this.spawnsBySession.get(sessionCode)?.delete(objectId);
+    const memberId = this.ownerByObjectId.get(objectId);
+    if (memberId) {
+      this.spawnsByMember.get(memberId)?.delete(objectId);
+      this.ownerByObjectId.delete(objectId);
+    }
+  }
+
+  /**
+   * The memberId that spawned objectId, if any (A4 ownership authority). server.ts
+   * uses this to reject state_update/despawn/fire_event messages referencing an
+   * objectId the sender does not actually own -- undefined means "nobody has
+   * spawned this objectId", which callers must also treat as unauthorized (an
+   * orphan reference), not as "anyone may claim it".
+   */
+  ownerOf(objectId: string): string | undefined {
+    return this.ownerByObjectId.get(objectId);
+  }
+
+  /**
+   * True if memberId already has an active spawn under some OTHER objectId (A4
+   * spawn cap: one active spawn per member in v1). Re-spawning the SAME objectId
+   * (a respawn) is always allowed and is not "other" for this check.
+   */
+  hasOtherActiveSpawn(memberId: string, objectId: string): boolean {
+    const owned = this.spawnsByMember.get(memberId);
+    if (!owned) return false;
+    for (const ownedId of owned) {
+      if (ownedId !== objectId) return true;
+    }
+    return false;
   }
 }
