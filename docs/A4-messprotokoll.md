@@ -2,12 +2,15 @@
 
 **Status: gemischt.** Die Server- und Agent-seitige HP-Autorität/Härtung
 (`server/src/hpTracker.ts`, `server/src/server.ts`, `server/src/sessionManager.ts`,
-`agent/src/relayFilter.ts`, `agent/src/arenaBounds.ts`) ist mit echten Tests
-**VERIFIED** (193 Tests grün insgesamt: 45 protocol + 83 agent + 65 server,
-`npm test --workspaces`). Alles Mod-seitige (`mod/md/XMP_Arena.xml`) ist wie bei
-A1–A3 ausschließlich auf syntaktische XML-Gültigkeit geprüft (PowerShell
-`[xml]`-Parser); die Semantik ist komplett ungeprüft, keine X4-Installation
-verfügbar.
+`agent/src/relayFilter.ts`, `protocol/src/arenaBounds.ts`) ist mit echten Tests
+**VERIFIED** (209 Tests grün insgesamt: 54 protocol + 75 agent + 80 server,
+`npm test --workspaces`) UND zusätzlich per echtem End-to-End-Lauf demonstriert
+(zwei Simulator-Instanzen + Agent + Relay-Server, kein X4 nötig -- Abschnitt 9,
+mit Log-Auszug). Alles Mod-seitige (`mod/md/XMP_Arena.xml`) bleibt wie bei A1–A3
+ausschließlich auf syntaktische XML-Gültigkeit geprüft (PowerShell
+`[xml]`-Parser); die Mod-Semantik selbst ist weiterhin komplett ungeprüft, keine
+X4-Installation verfügbar -- der E2E-Lauf beweist die Server/Agent-Seite der
+Kette, nicht die MD/AI-Script-Seite.
 
 Dieser Meilenstein wurde in zwei Runden umgesetzt: der ursprüngliche Kernauftrag
 (Abschnitte 1–3 unten), dann eine zweite Runde mit sieben zusätzlichen,
@@ -256,25 +259,34 @@ isoliert).
       (nicht Teil von PlanMod.md bis inkl. A4), muss dieser Cap überarbeitet
       werden (pro Mitglied konfigurierbares Limit statt hartem `1`).
 
-## 7. Agent-seitige Koordinaten-/Velocity-Clamps (`agent/src/arenaBounds.ts`)
+## 7. Koordinaten-/Velocity-Clamps: Konstanten in `protocol/`, Durchsetzung im Agent
 
-Neue, rein lokale (kein Protokoll-Bezug) Prüfung im Agent, NICHT im Server:
-`ARENA_BOUNDS_METERS` (±500km je Achse) und `MAX_VELOCITY_MPS` (10km/s,
-Betrag über alle drei Achsen). `decideRelay` (`agent/src/relayFilter.ts`) lehnt
-ein `state_update` ab, dessen `position`/`velocity` diese Grenzen verletzt,
-BEVOR es beim Pipe-Write (`set_object_position`/Blackboard) ankommt. Bewusst
-grosszügig gewählt (A2s dedizierter Arena-Sektor ist klein, aber diese Werte
-sollen nur eindeutig unplausible Werte abfangen, keine schnellen-aber-echten).
-`Math.abs(NaN) <= X` und `NaN*NaN <= X²` sind beide `false`, die Prüfungen fangen
-NaN/Infinity also automatisch mit ab, ohne eigenen Sonderfall.
+Zwei getrennte Zuständigkeiten, bewusst nicht vermischt:
 
-Warum im Agent, nicht im Server (Team-Lead-Vorgabe explizit so formuliert,
-`decideRelay erweitern`): der Agent ist ohnehin schon die Stelle, an der
-`spawn`s Shiptype-Whitelist geprüft wird (A2) — konsistent, alle
-"ist das plausibel genug, um in die Pipe/das Spiel zu gelangen"-Prüfungen an
-einem Ort zu bündeln, statt sie zwischen Server und Agent aufzuteilen.
+- **Konstanten und reine Prüf-Funktionen leben in `protocol/src/arenaBounds.ts`**
+  (`ARENA_BOUNDS_METERS` = ±500km je Achse, `MAX_VELOCITY_MPS` = 10km/s Betrag
+  über alle drei Achsen, plus `isWithinArenaBounds`/`isPlausibleVelocity`) —
+  Team-Lead-Vorgabe explizit so präzisiert ("Konstanten ins protocol-Package"),
+  nachdem die erste Runde sie noch agent-lokal hatte. Passt zum bestehenden
+  Muster: geteilte, dokumentierte Fakten über die Spielsimulation gehören neben
+  `combat.ts`/`limits.ts` ins Protokoll-Paket, nicht in eine einzelne
+  Komponente, auch wenn der Mod sie (wie bei `combat.ts`) nicht direkt
+  importieren kann.
+- **Die tatsächliche DURCHSETZUNG bleibt im Agent** (`decideRelay`,
+  `agent/src/relayFilter.ts`, Team-Lead-Vorgabe "im Agent", `decideRelay
+  erweitern"): lehnt ein `state_update` ab, dessen `position`/`velocity` diese
+  Grenzen verletzt, BEVOR es beim Pipe-Write (`set_object_position`/Blackboard)
+  ankommt. Der Agent ist ohnehin schon die Stelle, an der `spawn`s
+  Shiptype-Whitelist geprüft wird (A2) — konsistent, alle "ist das plausibel
+  genug, um in die Pipe/das Spiel zu gelangen"-Prüfungen an einem Ort zu
+  bündeln, statt sie zwischen Server und Agent aufzuteilen.
 
-Getestet in `agent/tests/arenaBounds.test.ts` (reine Funktionstests,
+Bewusst grosszügig gewählt (A2s dedizierter Arena-Sektor ist klein, aber diese
+Werte sollen nur eindeutig unplausible Werte abfangen, keine schnellen-aber-
+echten). `Math.abs(NaN) <= X` und `NaN*NaN <= X²` sind beide `false`, die
+Prüfungen fangen NaN/Infinity also automatisch mit ab, ohne eigenen Sonderfall.
+
+Getestet in `protocol/tests/arenaBounds.test.ts` (reine Funktionstests,
 inkl. Grenzwert exakt an der Kante, NaN/Infinity, kombinierte Geschwindigkeit
 über alle drei Achsen statt nur pro Achse) und
 `agent/tests/relayFilter.test.ts` (Integration in `decideRelay`).
@@ -340,6 +352,65 @@ unterscheiden lässt. Damit ist die komplette Kampf-Kette mit zwei
 Simulator-Instanzen ohne X4-Installation vorführbar, exakt wie A2s
 Spawn/State-Update-Kette es bereits war — siehe `simulate.ts`s Dateikopf für das
 konkrete Demo-Kommando.
+
+**Live durchgeführt** (Relay-Server auf Port 8901, zwei Agent-Instanzen
+`xmp-demo-a`/`xmp-demo-b` in derselben Session `demo-arena`, zwei
+Simulator-Instanzen `sim-A`/`sim-B`; `sim-B` mit
+`--hit-target sim-A --damage 100 --damage-type hull --hit-delay-ms 2000`, also
+genau tödlich gegen `sim-A`s Standard-100-Hull). Auszug aus `sim-A`s eigenem Log
+(dem GETROFFENEN Client) und `sim-B`s Log (dem ANGREIFER):
+
+```
+# sim-A (Opfer), Ende des Logs:
+[sim] remote pos sim-B 949.2,0.0,314.6 latency=2ms
+[sim] remote pos sim-B 942.8,0.0,333.5 latency=2ms
+[sim] hp_state sim-A hull=0 shield=100 (DESTROYED)
+[sim] remote despawn sim-A (reason=destroyed)
+[sim] remote pos sim-B 928.7,0.0,370.9 latency=2ms
+...
+
+# sim-B (Angreifer), Ende des Logs:
+[sim] remote pos sim-A 867.8,0.0,496.9 latency=1ms
+[simulate] sending hit_report: 100 hull damage on sim-A
+[sim] hp_state sim-A hull=0 shield=100 (DESTROYED)
+[sim] remote despawn sim-A (reason=destroyed)
+```
+
+Bestätigt live, nicht nur per Unit-/Integrationstest: (1) `hit_report` erreicht
+den Server und wird verarbeitet, (2) `hp_state` geht an BEIDE Seiten (Opfer UND
+Angreifer sehen exakt dieselbe Zeile), (3) Hull `0` löst die
+Zerstörungs-Despawn-Sequenz mit `reason=destroyed` aus, (4) beide Seiten sehen
+dieselbe Sequenz in derselben Reihenfolge.
+
+**Unerwarteter, aber aufschlussreicher Nebenbefund im Server-Log:** nach der
+Zerstörung sendet `sim-A`s eigener Simulator-Prozess weiterhin unbeirrt 10Hz-
+`state_update`s für sich selbst (`setInterval` in `simulate.ts` kennt keinen
+"ich bin tot"-Zustand, anders als der echte Mod, dessen Telemetrie-Loop
+`player.entity.exists` vor jedem Tick prüft). Der Server lehnt diese Updates
+jetzt korrekt ab:
+
+```
+[server] sim-A destroyed (hull reached 0) in session demo-arena
+[server] dropped state_update from <clientId>: shipId "sim-A" is not owned by this client (or has no known spawn)
+[server] dropped state_update from <clientId>: shipId "sim-A" is not owned by this client (or has no known spawn)
+... (wiederholt sich mit 10Hz, solange der Simulator weiterläuft)
+```
+
+Kein Bug in der Ownership-Prüfung — im Gegenteil, das ist GENAU das erwartete
+Verhalten: `removeSpawn()` (Abschnitt 1) hat den Spawn-Datensatz beim
+Zerstören gelöscht, `ownerOf("sim-A")` liefert danach `undefined`, die
+Ownership-Prüfung (Abschnitt 5) behandelt das korrekt wie jede andere
+unbekannte `shipId` — verwirft, statt eine zerstörte `objectId` durch einen
+verspäteten Tick "wiederzubeleben". Der Simulator selbst müsste eigentlich
+seinen `setInterval` stoppen, sobald er sein eigenes `hp_state hull<=0` sieht;
+das ist eine reine Simulator-Vereinfachung (der echte Mod bräuchte das nicht,
+da `player.entity` nach `destroy_object` nicht mehr existiert), nicht behoben,
+da für den E2E-Beweis irrelevant, aber hier festgehalten, damit sich niemand an
+den wiederholten Log-Zeilen bei einem künftigen Testlauf stört.
+
+- [ ] Simulator-Komfortverbesserung (kein A4-Blocker): `simulate.ts` könnte auf
+      ein eigenes `hp_state hull<=0` reagieren und seinen `sendTick`-Interval
+      stoppen, um das Log sauberer zu halten. Optional für A5.
 
 ## 10. Nächste Schritte
 

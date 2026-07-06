@@ -36,13 +36,13 @@ server only accepts/forwards a `state_update` whose `shipId` the sender actually
 owns (rejects both spoofed IDs belonging to someone else and orphaned IDs with no
 recorded spawn at all); separately, the AGENT (not the server) also rejects one
 whose `position`/`velocity` fall outside plausible bounds before it ever reaches the
-pipe (`agent/src/arenaBounds.ts`, `decideRelay`).
+pipe (`protocol/src/arenaBounds.ts`, `decideRelay`).
 **Purpose:** Periodic export of one ship's kinematic state (A1: the local player's own ship).
 
 | Field | Type | Notes |
 |---|---|---|
 | `shipId` | string | Stable identifier for the ship (A1: the sending player's ship). |
-| `position` | `{x,y,z}` | World-space position. Agent-side sanity bound: `ARENA_BOUNDS_METERS` (`agent/src/arenaBounds.ts`). |
+| `position` | `{x,y,z}` | World-space position. Agent-side sanity bound: `ARENA_BOUNDS_METERS` (`protocol/src/arenaBounds.ts`). |
 | `rotation` | `{qx,qy,qz,qw}` | Orientation quaternion. |
 | `velocity` | `{x,y,z}` | Velocity vector, world-space. Agent-side sanity bound: `MAX_VELOCITY_MPS`. |
 | `mdRate` | number (optional) | MD's own measured tick rate in Hz for this cue, so receivers can distinguish network jitter from a slow MD tick (PlanMod.md 0.3). |
@@ -64,6 +64,18 @@ respawn by re-sending the SAME `objectId` instead).
 | `owner` | string | Owning player's identifier/name. |
 | `maxHull` | number (optional, A4) | Starting hull for the server's HP authority (`server/src/hpTracker.ts`). Falls back to `DEFAULT_HULL` (`src/combat.ts`) if absent. |
 | `maxShield` | number (optional, A4) | Starting shield, same fallback pattern (`DEFAULT_SHIELD`). |
+
+**Explicit v1 balancing simplification:** every ship gets the same starting
+hull/shield regardless of `shipType` today. `mod/md/XMP_Arena.xml`'s
+`XMP_Arena_AnnounceSpawn` sends `maxHull`/`maxShield` on every spawn, but always
+the same fixed numbers (`$XMP.CombatDefaultMaxHull`/`$XMP.CombatDefaultMaxShield`,
+currently 100/100, matching `DEFAULT_HULL`/`DEFAULT_SHIELD`) -- there is no
+per-shiptype table yet, so a heavy destroyer and a light scout currently start
+combat with identical HP. The field exists specifically so this can change
+without another protocol version bump: real per-shiptype (or per-loadout) values
+are expected to land alongside A5's loadout work, at which point
+`XMP_Arena_AnnounceSpawn` would read them from the ship's actual macro/loadout
+instead of the two fixed constants.
 
 ### `despawn`
 **Direction:** server -> clients under normal operation (disconnect, or a
@@ -132,7 +144,7 @@ data to relay; A4 substantially expands that:
 | Check | Where | Rejects |
 |---|---|---|
 | Ship macro whitelist | `agent/src/relayFilter.ts` (`decideRelay`) | `spawn` with a `shipType` outside `SHIP_MACRO_WHITELIST`. |
-| Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`), `agent/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
+| Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`), `protocol/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
 | Orphan filter | `agent/src/relayFilter.ts` (`decideRelay`) | `state_update`/`hit_report` for a `shipId`/`targetId` with no known spawn -- also what keeps the agent's `LatencyTracker` map bounded. |
 | Ownership authority | `server/src/server.ts`, `server/src/sessionManager.ts` (`ownerOf`) | `spawn`/`state_update`/`despawn`/`fire_event` referencing an `objectId` the sender does not own. |
 | Spawn cap | `server/src/sessionManager.ts` (`hasOtherActiveSpawn`) | A second, different `objectId` spawned by a client that already has one active. |

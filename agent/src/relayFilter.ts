@@ -1,5 +1,11 @@
-import { isKnownShipMacro, type ProtocolMessage } from "@xmultiplayer/protocol";
-import { ARENA_BOUNDS_METERS, isPlausibleVelocity, isWithinArenaBounds, MAX_VELOCITY_MPS } from "./arenaBounds.js";
+import {
+  ARENA_BOUNDS_METERS,
+  isKnownShipMacro,
+  isPlausibleVelocity,
+  isWithinArenaBounds,
+  MAX_VELOCITY_MPS,
+  type ProtocolMessage,
+} from "@xmultiplayer/protocol";
 
 export type RelayDecision = { forward: true } | { forward: false; reason: string };
 

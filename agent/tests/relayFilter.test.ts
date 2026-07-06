@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ARENA_BOUNDS_METERS, MAX_VELOCITY_MPS } from "@xmultiplayer/protocol";
 import { decideRelay } from "../src/relayFilter.js";
-import { ARENA_BOUNDS_METERS, MAX_VELOCITY_MPS } from "../src/arenaBounds.js";
 
 const base = { v: 1 as const, seq: 1, ts: 1_720_000_000_000 };
 const noneKnown: ReadonlySet<string> = new Set();
