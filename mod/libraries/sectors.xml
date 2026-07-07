@@ -8,8 +8,8 @@
         <identification name="{20206,9003}" description="{20206,9004}" />
         <sound reference="ambient_sector_default" />
         <!-- Empty space: no region/asteroid/nebula content for this first Arena
-             map variant (PlanMod.md 1.1 lists asteroid/debris/nebula variants as
-             later additions). -->
+             map variant ("Referenz/Debug", PlanMod.md 1.1). The three variants
+             below add exactly that. -->
       </properties>
       <connections>
         <connection name="XMP_Arena_Zone_connection" ref="zones">
@@ -17,6 +17,90 @@
             <position x="0" y="0" z="0" />
           </offset>
           <macro connection="Sector" ref="XMP_Arena_Zone_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </sector>
+
+  <!--
+    A5 map variants (PlanMod.md 1.1: Asteroidenfeld/Trümmerfeld/Nebelregion),
+    each otherwise identical to the base Arena sector above, differing only in
+    the <region> reference added to <properties>. HIGHEST-RISK ASSUMPTION IN
+    THIS FILE: the exact vanilla region definition macro names below
+    (region_asteroidbelt_dense_01_macro / region_debrisfield_01_macro /
+    region_nebula_dense_01_macro) are PLACEHOLDERS following X4's documented
+    region-macro naming convention, not confirmed against the actual game's
+    region library; this is squarely in "needs a real X4 install to grep the
+    game's own region definitions and substitute the correct names" territory,
+    same category of risk as the ship macro whitelist (protocol/src/shipMacros.ts).
+    The surrounding cluster/sector/zone/gamestart structure itself is low-risk
+    (identical to the already-established base Arena pattern); only these three
+    single <region> lines need fixing if the names turn out wrong.
+  -->
+  <sector name="XMP_Arena_Sector_Asteroid" instantiate="1">
+    <macro name="XMP_Arena_Sector_Asteroid_macro" class="sector">
+      <component ref="standardsector" />
+      <properties>
+        <identification name="{20206,9016}" description="{20206,9017}" />
+        <sound reference="ambient_sector_default" />
+        <region ref="region_asteroidbelt_dense_01_macro">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+        </region>
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Zone_Asteroid_connection" ref="zones">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Sector" ref="XMP_Arena_Zone_Asteroid_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </sector>
+
+  <sector name="XMP_Arena_Sector_Debris" instantiate="1">
+    <macro name="XMP_Arena_Sector_Debris_macro" class="sector">
+      <component ref="standardsector" />
+      <properties>
+        <identification name="{20206,9018}" description="{20206,9019}" />
+        <sound reference="ambient_sector_default" />
+        <region ref="region_debrisfield_01_macro">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+        </region>
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Zone_Debris_connection" ref="zones">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Sector" ref="XMP_Arena_Zone_Debris_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </sector>
+
+  <sector name="XMP_Arena_Sector_Nebula" instantiate="1">
+    <macro name="XMP_Arena_Sector_Nebula_macro" class="sector">
+      <component ref="standardsector" />
+      <properties>
+        <identification name="{20206,9020}" description="{20206,9021}" />
+        <sound reference="ambient_sector_default" />
+        <region ref="region_nebula_dense_01_macro">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+        </region>
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Zone_Nebula_connection" ref="zones">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Sector" ref="XMP_Arena_Zone_Nebula_macro" />
         </connection>
       </connections>
     </macro>

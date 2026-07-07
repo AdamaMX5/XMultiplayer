@@ -25,12 +25,30 @@ export class SessionManager {
   // combat, A4) can be un-recorded without touching that member's OTHER spawns.
   private ownerByObjectId = new Map<string, string>();
 
-  join(sessionCode: string, member: SessionMember): void {
-    this.leave(member.id); // a client can only be in one session at a time
+  /**
+   * A client can only be in one session at a time, so joining calls leave()
+   * first. Returns whatever leave() returned (undefined if the member wasn't in
+   * any session before), so the caller (server.ts's joinSession) can run the
+   * SAME spawn/HP cleanup a disconnect would (takeSpawnedObjectIds + despawn
+   * broadcasts + hp.remove) for the OLD session -- this class only tracks state,
+   * it doesn't own hp.remove or the sockets needed to broadcast, so it can't do
+   * that cleanup itself. Before this fix (A5 review requirement), a session
+   * switch left the old session's spawn/HP records as permanent ghosts: leave()
+   * only ever cleaned up session MEMBERSHIP (this.sessions/memberSession), never
+   * spawnsBySession/spawnsByMember/ownerByObjectId/the HP tracker. That was a
+   * latent, undetected bug through A1-A4 because nothing ever actually called
+   * join() twice for the same member with real spawns in between -- A5's
+   * presence-based drop-in (walking between sectors triggers a real session
+   * switch) is what turns it into a real, everyday occurrence instead of a
+   * theoretical one.
+   */
+  join(sessionCode: string, member: SessionMember): LeaveResult | undefined {
+    const previous = this.leave(member.id);
     const members = this.sessions.get(sessionCode) ?? new Map<string, SessionMember>();
     members.set(member.id, member);
     this.sessions.set(sessionCode, members);
     this.memberSession.set(member.id, sessionCode);
+    return previous;
   }
 
   leave(memberId: string): LeaveResult | undefined {
@@ -60,8 +78,18 @@ export class SessionManager {
     return members ? [...members.values()] : [];
   }
 
+  /** A single member of a session by id, e.g. to look up a display name for the kill-feed (A5). */
+  memberOf(sessionCode: string, memberId: string): SessionMember | undefined {
+    return this.sessions.get(sessionCode)?.get(memberId);
+  }
+
   sessionCount(): number {
     return this.sessions.size;
+  }
+
+  /** True if sessionCode already has at least one member (A5 max-sessions enforcement: joining an EXISTING session never counts as "creating a new one"). */
+  hasSession(sessionCode: string): boolean {
+    return (this.sessions.get(sessionCode)?.size ?? 0) > 0;
   }
 
   /** Records that memberId spawned objectId in sessionCode, keeping the raw message for replay. */

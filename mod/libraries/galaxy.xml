@@ -16,5 +16,26 @@
       </offset>
       <macro connection="Galaxy" ref="Cluster_XMP_Arena_macro" />
     </connection>
+    <!-- A5 map variants: each at its own large offset, same isolation rationale
+         as the base Arena cluster above (far outside the normal galaxy map, no
+         gate/highway connections, reachable only via their own gamestart). -->
+    <connection name="Cluster_XMP_Arena_Asteroid_connection" ref="clusters">
+      <offset>
+        <position x="2000000" y="0" z="2200000" />
+      </offset>
+      <macro connection="Galaxy" ref="Cluster_XMP_Arena_Asteroid_macro" />
+    </connection>
+    <connection name="Cluster_XMP_Arena_Debris_connection" ref="clusters">
+      <offset>
+        <position x="2000000" y="0" z="2400000" />
+      </offset>
+      <macro connection="Galaxy" ref="Cluster_XMP_Arena_Debris_macro" />
+    </connection>
+    <connection name="Cluster_XMP_Arena_Nebula_connection" ref="clusters">
+      <offset>
+        <position x="2000000" y="0" z="2600000" />
+      </offset>
+      <macro connection="Galaxy" ref="Cluster_XMP_Arena_Nebula_macro" />
+    </connection>
   </add>
 </diff>

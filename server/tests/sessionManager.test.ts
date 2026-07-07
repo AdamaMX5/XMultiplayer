@@ -26,6 +26,32 @@ test("a client can only be in one session at a time: joining a new session leave
   assert.equal(sessions.sessionCodeOf("a"), "arena-2");
 });
 
+// --- A5 review fix: join() returns the previous session (if any), so the caller
+// (server.ts's joinSession) can clean up its spawns/HP the same way a disconnect
+// would. See sessionManager.ts's join() doc comment for the ghost-spawn bug this closes.
+
+test("join() returns undefined for a member's very first join (nothing to clean up)", () => {
+  const sessions = new SessionManager();
+  const previous = sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  assert.equal(previous, undefined);
+});
+
+test("join() returns the OLD sessionCode and member when switching to a different session", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  const previous = sessions.join("arena-2", { id: "a", playerName: "Alice" });
+  assert.deepEqual(previous, { sessionCode: "arena-1", member: { id: "a", playerName: "Alice" } });
+});
+
+test("join() still returns the previous session even when re-joining the SAME sessionCode", () => {
+  // The caller is responsible for checking previous.sessionCode !== the new code;
+  // join() itself doesn't special-case a same-session re-join.
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  const previous = sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  assert.deepEqual(previous, { sessionCode: "arena-1", member: { id: "a", playerName: "Alice" } });
+});
+
 test("leave() returns the sessionCode and member, and removes an empty session", () => {
   const sessions = new SessionManager();
   sessions.join("arena-1", { id: "a", playerName: "Alice" });

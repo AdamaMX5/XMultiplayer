@@ -16,5 +16,24 @@
     <t id="9007">You have joined an XMultiplayer arena session. Wait for your opponent to connect, then fight.</t>
     <t id="9008">Arena Pilot</t>
     <t id="9009">Arena Fighter</t>
+    <!-- A5 map variants (PlanMod.md 1.1). -->
+    <t id="9010">XMultiplayer Arena: Asteroid Field</t>
+    <t id="9011">A dedicated arena cluster for XMultiplayer PvP sessions, set in a dense asteroid field.</t>
+    <t id="9012">XMultiplayer Arena: Debris Field</t>
+    <t id="9013">A dedicated arena cluster for XMultiplayer PvP sessions, set in a drifting debris field.</t>
+    <t id="9014">XMultiplayer Arena: Nebula</t>
+    <t id="9015">A dedicated arena cluster for XMultiplayer PvP sessions, set in a dense nebula.</t>
+    <t id="9016">Arena Sector (Asteroid Field)</t>
+    <t id="9017">An asteroid-field sector reserved for XMultiplayer arena duels.</t>
+    <t id="9018">Arena Sector (Debris Field)</t>
+    <t id="9019">A debris-field sector reserved for XMultiplayer arena duels.</t>
+    <t id="9020">Arena Sector (Nebula)</t>
+    <t id="9021">A nebula sector reserved for XMultiplayer arena duels.</t>
+    <t id="9022">XMultiplayer Arena: Asteroid Field</t>
+    <t id="9023">Start a dedicated PvP arena session amid a dense asteroid field. No factions, no economy, no jobs -- just you, your opponent, and the rocks.</t>
+    <t id="9024">XMultiplayer Arena: Debris Field</t>
+    <t id="9025">Start a dedicated PvP arena session amid a drifting debris field. No factions, no economy, no jobs -- just you, your opponent, and the wreckage.</t>
+    <t id="9026">XMultiplayer Arena: Nebula</t>
+    <t id="9027">Start a dedicated PvP arena session inside a dense nebula. No factions, no economy, no jobs -- just you, your opponent, and reduced visibility.</t>
   </page>
 </language>

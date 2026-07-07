@@ -51,22 +51,45 @@ whose position/velocity fall outside plausible Arena bounds, and drops
 all happens server/agent-side against the existing wire format -- see
 `protocol/protocol.md`'s "Server-side validation" section for the full list.
 
-**Status: PLAUSIBLE, not VERIFIED (mod side); the server-side HP authority IS
-VERIFIED** (real `node:test` tests, `server/tests/hpTracker.test.ts` and
-`server/tests/session.test.ts`). This extension has not been loaded or run inside
-X4 (no game installation available in this development environment). The XML is
-checked to be syntactically valid, but the Mission Director/AI-script semantics
-(cue timing, the exact SirNukes Named_Pipes API surface, whether MD can parse a
+Milestone A5: "Drop-in-Arena" instead of a lobby -- explicit developer decision,
+no ready-check/countdown/session-code dialog at all. `XMP_Arena_PresenceLoop`
+polls `player.sector` once a second; entering the Arena sector sends a real
+`session` join plus a `spawn` built from the player's ACTUAL ship
+(`player.entity.macro.name`, `hullmax`/`shieldmax`), replacing A1-A4's
+unconditional-at-connect-time `XMP_Arena_AnnounceSpawn`; leaving it despawns and
+leaves the session. The agent mirrors this: it only still auto-joins at connect
+time when given an explicit `--session`/`XMP_SESSION` override (simulator/e2e/
+manual use); otherwise it waits for the mod's own join, and restores session
+membership (plus its own spawn) automatically after a relay reconnect
+(`agent/src/sessionState.ts`). The server now also builds a kill-feed `chat`
+message on every combat destruction, enforces a configurable ship-class rule
+preset (`--ships s|m|sm|all`) on top of the existing macro whitelist -- which it
+now also checks itself, closing a gap where only the agent ever did -- and
+detects the local player's own SETA (time acceleration) to tell the other side
+to freeze that player's proxy (`XMP.ProxyPilot.xml`'s `$XMP_Frozen`) rather than
+extrapolate through a broken time-scale assumption. Three additional map variants
+(asteroid field, debris field, nebula) ship as their own gamestarts. See
+`docs/A5-messprotokoll.md` for the full assumption list, including two
+explicitly **deferred, not-yet-attempted** items: real weapon-loadout
+enumeration and true pause detection (reasoned to likely be infeasible via MD
+polling at all, see that doc's section 8).
+
+**Status: PLAUSIBLE, not VERIFIED (mod side); the server/agent-side logic IS
+VERIFIED** (real `node:test` tests throughout `server/tests/` and
+`agent/tests/`). This extension has not been loaded or run inside X4 (no game
+installation available in this development environment). The XML is checked to
+be syntactically valid, but the Mission Director/AI-script semantics (cue
+timing, the exact SirNukes Named_Pipes API surface, whether MD can parse a
 received JSON string at all, the `<aiscript>` root shape, `move.to.position`, and
-`object.blackboard` as the MD/AI-script data channel from A3, and now -- A4 --
-whether `event_object_attacked`/`event_object_fired` exist as assumed and whether
-`set_object_invulnerable` truly prevents ALL local damage) are assumptions
-documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
-`aiscripts/XMP.ProxyPilot.xml` and in `docs/A1-messprotokoll.md` through
-`docs/A4-messprotokoll.md`. In-game validation is the first open task for all four
-milestones; A2's JSON-parsing assumption must be validated before A3 or A4 can be
-tested at all (no state_update/hit_report/hp_state data reaches the blackboard or
-the player's own ship otherwise).
+`object.blackboard` as the MD/AI-script data channel from A3, whether
+`event_object_attacked`/`event_object_fired` exist as assumed (A4), and now --
+A5 -- whether `player.sector`/`player.entity.hullmax`/`player.timewarp` exist as
+assumed) are assumptions documented inline in `md/XMP_Telemetry.xml`/
+`md/XMP_Arena.xml`/`aiscripts/XMP.ProxyPilot.xml` and in
+`docs/A1-messprotokoll.md` through `docs/A5-messprotokoll.md`. In-game validation
+is the first open task for all five milestones; A2's JSON-parsing assumption must
+be validated before A3-A5 can be tested at all (no state_update/hit_report/
+hp_state/session data reaches the blackboard or the player's own ship otherwise).
 
 ## Dependencies
 
@@ -85,12 +108,16 @@ the player's own ship otherwise).
    - `<X4 install>/extensions/xmultiplayer/` or
    - `%APPDATA%/Roaming/EgoSoft/X4/<user id>/extensions/xmultiplayer/`
 3. Enable both extensions in the in-game extension manager and restart X4.
-4. Start a new game via the "XMultiplayer Arena" custom gamestart (added by A2) --
-   this drops you directly into the dedicated, empty Arena sector with a starting
-   fighter, no factions/jobs/economy running.
-5. Start the XMultiplayer agent (`npm start` in `/agent`, see the root README) before
-   or after launching X4 -- the agent listens on the pipe continuously and the mod
-   retries the connection with backoff if the agent isn't up yet.
+4. Start a new game via one of the four "XMultiplayer Arena" custom gamestarts
+   (base/asteroid field/debris field/nebula, A2 + A5) -- each drops you directly
+   into its own dedicated Arena sector with a starting fighter, no factions/jobs/
+   economy running.
+5. Start the XMultiplayer agent (`npm start` in `/agent`, see the root README)
+   before or after launching X4 -- the agent listens on the pipe continuously and
+   the mod retries the connection with backoff if the agent isn't up yet. Since
+   A5, simply being in the Arena sector is what joins the session (no extra step):
+   the agent auto-joins at connect time ONLY if given an explicit `--session`/
+   `XMP_SESSION` (leave it unset for normal drop-in play).
 
 ## Expected pipe name
 
@@ -111,12 +138,15 @@ achievable MD update rate -- the critical number for all of Phase 1 (PlanMod.md 
 proxy spawned/despawned per objectId, and a warning if a spawn arrives for an
 objectId that already has a proxy. Since A4, also logs a destruction (own ship or
 proxy) as "destroyed (server-confirmed)", distinguishing it from a regular despawn.
-The agent's 5-second stats also report `remoteForwarded`/`remoteDropped` counts for
-messages relayed down into the pipe.
+Since A5, also logs entering/leaving the Arena sector and a SETA status change for
+another session member ("activated SETA (proxy frozen)"/"left SETA (proxy
+resumed)"). The agent's 5-second stats also report `remoteForwarded`/
+`remoteDropped` counts for messages relayed down into the pipe.
 
 `XMP.ProxyPilot.xml` logs under a `[XMultiplayer][ProxyPilot]` prefix: a snap
-teleport (with the squared deviation that triggered it) and a "holding position"
-line when `$UpdateTimeoutSec` is exceeded. Frequent snaps or holds are a signal
-the tuning defaults (`XMP_Arena_TuningDefaults`) need adjusting for the observed
-latency/speeds, see `docs/A3-messprotokoll.md` (which also has the in-game
-measurement template and A2-vs-A3 comparison table).
+teleport (with the squared deviation that triggered it), a "holding position"
+line when `$UpdateTimeoutSec` is exceeded, and, since A5, "frozen (owner in
+SETA), holding position" when the proxy's owner is in SETA. Frequent snaps or
+holds are a signal the tuning defaults (`XMP_Arena_TuningDefaults`) need
+adjusting for the observed latency/speeds, see `docs/A3-messprotokoll.md` (which
+also has the in-game measurement template and A2-vs-A3 comparison table).

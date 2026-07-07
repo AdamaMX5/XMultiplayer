@@ -113,51 +113,167 @@
           <set_value name="$XMP.DeadReckoningSnapThresholdMeters" exact="500" />
           <set_value name="$XMP.DeadReckoningUpdateTimeoutSec" exact="5" />
           <set_value name="$XMP.DeadReckoningRetargetIntervalSec" exact="0.3" />
-          <!-- A4: sent as spawn.maxHull/maxShield (XMP_Arena_AnnounceSpawn below) so
-               the server's HP authority (server/src/hpTracker.ts) starts this ship
-               at the same values the mod itself considers "full health". Mirrors
-               protocol/src/combat.ts's DEFAULT_HULL/DEFAULT_SHIELD (100/100);
-               there is no shared source between MD and TS, so keep these two
-               numbers in sync by hand if either changes. Flat values for every
-               ship type in v1, not yet read from the ship's actual macro stats. -->
-          <set_value name="$XMP.CombatDefaultMaxHull" exact="100" />
-          <set_value name="$XMP.CombatDefaultMaxShield" exact="100" />
+          <!-- A5: this mod's own dedicated sector (libraries/sectors.xml), compared
+               against player.sector each presence-check tick to detect the player
+               entering/leaving it (XMP_Arena_PresenceCheck below). Must match that
+               file's XMP_Arena_Sector_macro name. -->
+          <set_value name="$XMP.ArenaSectorMacroName" exact="'XMP_Arena_Sector_macro'" />
         </do_all>
       </actions>
     </cue>
 
     <!--
-      Announces our own ship to the rest of the session once telemetry starts, so
-      other clients know to spawn a proxy for us. Reuses XMP_Telemetry_WriteToPipe
-      (XMP_Telemetry.xml) for the actual write/retry/backoff handling, so this cue
-      only has to build the JSON payload. Since A4, also sends maxHull/maxShield
-      (XMP_Arena_TuningDefaults above) so the server's HP authority initializes
-      this ship's HP from the same "full health" values the mod itself uses,
-      rather than falling back to protocol/src/combat.ts's DEFAULT_HULL/
-      DEFAULT_SHIELD (which happen to be the same numbers today, but the field
-      exists precisely so that no longer has to hold once per-shiptype HP exists).
+      A5 "Drop-in-Arena": polls player.sector once per second and compares its
+      macro name against $XMP.ArenaSectorMacroName (XMP_Arena_TuningDefaults
+      above). A change from outside->inside triggers XMP_Arena_OnEnterSector
+      (session join + real-ship spawn); inside->outside triggers
+      XMP_Arena_OnExitSector (despawn + session leave). Replaces A1-A4's
+      XMP_Arena_AnnounceSpawn, which announced a spawn unconditionally once the
+      pipe was ready, regardless of where the player actually was; the entire
+      point of presence-based drop-in is that entering/leaving is a real event
+      tied to the player's location, not a one-time thing at connect time.
+
+      Deliberately on its own slow, independent 1-second poll rather than piggy-
+      backing on XMP_Telemetry_Tick's 10Hz loop: sector changes are rare, so
+      polling them at telemetry rate would just be wasted work, and keeping this
+      cue separate means a change to the telemetry rate can never accidentally
+      change how quickly a sector change is noticed (or vice versa).
+
+      Assumption (this cue's single biggest risk, see docs/A5-messprotokoll.md):
+      `player.sector` exists and exposes `.macro.name`, mirroring the same
+      `.macro.name` pattern already used for the player's own ship
+      (player.entity.macro.name, used below and since A1's spawn/HandleSpawn). If
+      X4 exposes the current sector differently (e.g. only via
+      player.entity.sector, or with no macro-name accessor at all), only this
+      one comparison needs to change; the enter/exit state machine around it
+      does not.
     -->
-    <cue name="XMP_Arena_AnnounceSpawn" instantiate="true">
+    <cue name="XMP_Arena_PresenceLoop" instantiate="true">
       <conditions>
         <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
       </conditions>
       <actions>
-        <do_if value="player.entity.exists and player.entity.isclass.ship">
-          <do_all>
-            <set_value name="$XMP.Json"
-              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;spawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
-                + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
-                + ',&quot;shipType&quot;:&quot;' + player.entity.macro.name + '&quot;'
-                + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
-                + ',&quot;maxHull&quot;:' + $XMP.CombatDefaultMaxHull
-                + ',&quot;maxShield&quot;:' + $XMP.CombatDefaultMaxShield
-                + '}'" />
-            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
-          </do_all>
-          <else>
-            <debug_text text="'[XMultiplayer][Arena] no player ship yet, cannot announce spawn'" filter="general" />
-          </else>
-        </do_if>
+        <do_all>
+          <set_value name="$XMP.WasInArenaSector" exact="false" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Arena_PresenceCheck" />
+      </cues>
+    </cue>
+
+    <cue name="XMP_Arena_PresenceCheck" instantiate="true">
+      <delay exact="1s" />
+      <actions>
+        <do_all>
+          <set_value name="$XMP.IsInArenaSector"
+            exact="player.entity.exists and player.entity.isclass.ship and player.sector.macro.name == $XMP.ArenaSectorMacroName" />
+          <do_if value="$XMP.IsInArenaSector and not $XMP.WasInArenaSector">
+            <include_interrupt_actions ref="XMP_Arena_OnEnterSector" />
+          </do_if>
+          <do_if value="not $XMP.IsInArenaSector and $XMP.WasInArenaSector">
+            <include_interrupt_actions ref="XMP_Arena_OnExitSector" />
+          </do_if>
+          <set_value name="$XMP.WasInArenaSector" exact="$XMP.IsInArenaSector" />
+        </do_all>
+      </actions>
+      <cues>
+        <cue name="XMP_Arena_PresenceCheck_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      Player just entered the Arena sector: join the session, then announce our
+      own ship with REAL data. sessionCode is a fixed literal ("arena") matching
+      the agent's own default (agent/src/config.ts's DEFAULTS.sessionCode);
+      this mod deliberately has no session-code configuration UI/dialog of its
+      own ("Drop-in-Arena statt Lobby", explicit developer decision, see the
+      A5 task description), it just has to agree with the agent on the string
+      whenever the agent isn't given an explicit session override (its "session"
+      CLI flag, or XMP_SESSION).
+
+      maxHull/maxShield: assumed absolute-point accessors player.entity.hullmax/
+      shieldmax, matching this protocol's plain numeric HP model. This is the
+      SECOND biggest open question in this file (after the sector-detection one
+      above): X4 commonly expresses hull/shield as a 0..1 FRACTION in other
+      contexts, not absolute points, which would need converting against some
+      known baseline before being sent. See docs/A5-messprotokoll.md. Unlike the
+      old fixed 100/100 constants (A4), there is no runtime fallback here if
+      these property names are wrong; MD has no try/catch, so getting this
+      wrong likely breaks the whole enter sequence, not just these two fields.
+      protocol/src/combat.ts's DEFAULT_HULL/DEFAULT_SHIELD remain the server-
+      side fallback (server/src/server.ts) if maxHull/maxShield end up omitted
+      instead, once that turns out to be necessary.
+
+      Loadout (weapon macros) is NOT sent here: enumerating the ship's equipped
+      weapons would need an assumed collection-iteration API
+      (do_for_all over something like player.entity.equipment.weapons) with no
+      existing pattern anywhere else in this codebase to anchor the guess on,
+      unlike shipType/hullmax/shieldmax which all mirror an ALREADY-used
+      accessor style. Guessing wrong here risks breaking the entire enter
+      sequence for a field that's still optional in the protocol
+      (SpawnMessage.loadout?), so it's left out entirely for now rather than
+      risk that; see docs/A5-messprotokoll.md for the deferral and what to try
+      once the real weapon-enumeration API is confirmed in-game.
+    -->
+    <cue name="XMP_Arena_OnEnterSector" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;session&quot;,&quot;action&quot;:&quot;join&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;sessionCode&quot;:&quot;arena&quot;'
+              + ',&quot;playerName&quot;:&quot;' + player.name + '&quot;'
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;spawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
+              + ',&quot;shipType&quot;:&quot;' + player.entity.macro.name + '&quot;'
+              + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
+              + ',&quot;maxHull&quot;:' + player.entity.hullmax
+              + ',&quot;maxShield&quot;:' + player.entity.shieldmax
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          <debug_text text="'[XMultiplayer][Arena] entered Arena sector: joined session and announced spawn'" filter="general" />
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Player just left the Arena sector (or their ship stopped existing/being a
+      ship while still nominally "in" it, e.g. boarding another vessel;
+      IsInArenaSector's own player.entity.exists/isclass.ship checks cover that
+      case the same way as leaving physically). Despawn first, then leave the
+      session, so remaining members see the ship disappear before they see the
+      player's name drop off (matches the disconnect-triggered order in
+      server.ts's handleDisconnect: despawn, then the leave broadcast).
+    -->
+    <cue name="XMP_Arena_OnExitSector" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;despawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
+              + ',&quot;reason&quot;:&quot;left_sector&quot;'
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;session&quot;,&quot;action&quot;:&quot;leave&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;sessionCode&quot;:&quot;arena&quot;'
+              + ',&quot;playerName&quot;:&quot;' + player.name + '&quot;'
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          <debug_text text="'[XMultiplayer][Arena] left Arena sector: despawned and left session'" filter="general" />
+        </do_all>
       </actions>
     </cue>
 
@@ -209,6 +325,14 @@
           </do_if>
           <do_if value="$XMP.RxType == 'fire_event'">
             <include_interrupt_actions ref="XMP_Arena_HandleFireEvent" />
+          </do_if>
+          <!-- A5: only session messages carrying a SETA status are acted on here;
+               join/leave/ready/countdown are not currently used for anything
+               client-side (join/leave are server bookkeeping; ready/countdown are
+               vestigial, protocol/protocol.md). XMP_Arena_HandleSetaStatus itself
+               checks the exact action, this is just the type-level dispatch. -->
+          <do_if value="$XMP.RxType == 'session'">
+            <include_interrupt_actions ref="XMP_Arena_HandleSetaStatus" />
           </do_if>
           <!-- Anything else (e.g. hit_report, which only ever flows client -> server,
                never back down to a client) is silently ignored: unknown/irrelevant
@@ -270,10 +394,9 @@
       IF YOU CHANGE THE LOGIC BELOW: protocol/tests/helpers/mdExtractFieldSimulation.ts
       is a hand-maintained Node port of this exact algorithm (no shared source,
       since MD isn't runnable outside X4 and so can't be imported/tested directly).
-      Update
-      that file in lockstep, or protocol/tests/canonical.test.ts's extraction tests
-      (including the A4 hit_report/hp_state ones) silently stop reflecting what this
-      cue actually does.
+      Update that file in lockstep, or protocol/tests/canonical.test.ts's extraction
+      tests (including the A4 hit_report/hp_state ones) silently stop reflecting
+      what this cue actually does.
     -->
     <cue name="XMP_Arena_ExtractField" instantiate="false">
       <actions>
@@ -344,6 +467,14 @@
                    XMP_Arena_OnProxyAttacked (A4): a combat event exposes the game
                    object that was hit, not our own wire-protocol id for it. -->
               <set_value name="$XMP.ProxyWireIdByGameId.{$XMP.NewProxyShip.id}" exact="$XMP.RxObjectId" />
+              <!-- A5: owner-name reverse lookups, needed by
+                   XMP_Arena_HandleSetaStatus, which only knows the AFFECTED
+                   PLAYER's name (from a session message), not their ship's wire
+                   objectId. $XMP.ProxyOwnerByObjectId is kept alongside so
+                   XMP_Arena_DestroyProxy can clear the by-owner entry again
+                   without needing its own extra parameter. -->
+              <set_value name="$XMP.ProxyObjectIdByOwner.{$XMP.RxOwner}" exact="$XMP.RxObjectId" />
+              <set_value name="$XMP.ProxyOwnerByObjectId.{$XMP.RxObjectId}" exact="$XMP.RxOwner" />
 
               <!-- Assumption (see file header): a proxy needs an assigned NPC pilot
                    before an AI-script can fly it. Defensive; may be unnecessary. -->
@@ -541,10 +672,16 @@
       <actions>
         <do_all>
           <set_value name="$XMP.DestroyGameId" exact="$XMP.Proxies.{$XMP.DestroyObjectId}.id" />
+          <!-- A5: capture the owner name BEFORE the object is destroyed below, so
+               the by-owner reverse lookup (XMP_Arena_HandleSpawn/
+               XMP_Arena_HandleSetaStatus) can be cleared too. -->
+          <set_value name="$XMP.DestroyOwner" exact="$XMP.ProxyOwnerByObjectId.{$XMP.DestroyObjectId}" />
           <stop_ai_script name="XMP.ProxyPilot" object="$XMP.Proxies.{$XMP.DestroyObjectId}" />
           <destroy_object object="$XMP.Proxies.{$XMP.DestroyObjectId}" explosion="$XMP.DestroyExplosion" />
           <set_value name="$XMP.Proxies.{$XMP.DestroyObjectId}" exact="null" />
           <set_value name="$XMP.ProxyWireIdByGameId.{$XMP.DestroyGameId}" exact="null" />
+          <set_value name="$XMP.ProxyOwnerByObjectId.{$XMP.DestroyObjectId}" exact="null" />
+          <set_value name="$XMP.ProxyObjectIdByOwner.{$XMP.DestroyOwner}" exact="null" />
         </do_all>
       </actions>
     </cue>
@@ -712,6 +849,127 @@
           </actions>
         </cue>
       </cues>
+    </cue>
+
+    <!--
+      A5 "SETA/Pause-Erkennung": polls the LOCAL player's own time-acceleration
+      state once per second (same cadence as the sector-presence poll above, for
+      the same "this is a rare event, no need for telemetry-rate polling"
+      reason) and broadcasts a `session` "seta_on"/"seta_off" action whenever it
+      CHANGES, so the other session member(s) can freeze this player's proxy on
+      their end (XMP_Arena_HandleSetaStatus below, XMP.ProxyPilot.xml's
+      $XMP_Frozen check).
+
+      Assumption (unconfirmed, biggest risk in this cue): `player.timewarp`
+      exists and returns a multiplier (1 = normal speed, higher during SETA).
+
+      True PAUSE detection is deliberately NOT attempted here: if the game is
+      genuinely paused, MD script execution itself most likely also halts (the
+      whole simulation stops), which would mean no cue, including this one,
+      could fire to detect entering a pause in the first place; only leaving one
+      could plausibly be noticed by comparing an elapsed-time gap after the fact,
+      which brings its own set of new assumptions this milestone doesn't take on
+      for uncertain benefit. In practice a paused player also simply stops
+      sending updates, which the EXISTING Dead Reckoning update-timeout
+      (XMP.ProxyPilot.xml's $UpdateTimeoutSec, A3) already handles gracefully by
+      holding the proxy in place, so "opponent went unresponsive for any
+      reason, including a pause" already has reasonable behavior without any
+      pause-specific code. See docs/A5-messprotokoll.md for the fuller reasoning.
+    -->
+    <cue name="XMP_Arena_SetaLoop" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.WasSetaActive" exact="false" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Arena_SetaCheck" />
+      </cues>
+    </cue>
+
+    <cue name="XMP_Arena_SetaCheck" instantiate="true">
+      <delay exact="1s" />
+      <actions>
+        <do_all>
+          <set_value name="$XMP.IsSetaActive" exact="player.entity.exists and player.timewarp &gt; 1" />
+          <do_if value="$XMP.IsSetaActive and not $XMP.WasSetaActive">
+            <do_all>
+              <set_value name="$XMP.Json"
+                exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;session&quot;,&quot;action&quot;:&quot;seta_on&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                  + ',&quot;sessionCode&quot;:&quot;arena&quot;'
+                  + ',&quot;playerName&quot;:&quot;' + player.name + '&quot;'
+                  + '}'" />
+              <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+            </do_all>
+          </do_if>
+          <do_if value="not $XMP.IsSetaActive and $XMP.WasSetaActive">
+            <do_all>
+              <set_value name="$XMP.Json"
+                exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;session&quot;,&quot;action&quot;:&quot;seta_off&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                  + ',&quot;sessionCode&quot;:&quot;arena&quot;'
+                  + ',&quot;playerName&quot;:&quot;' + player.name + '&quot;'
+                  + '}'" />
+              <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+            </do_all>
+          </do_if>
+          <set_value name="$XMP.WasSetaActive" exact="$XMP.IsSetaActive" />
+        </do_all>
+      </actions>
+      <cues>
+        <cue name="XMP_Arena_SetaCheck_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      Inbound: applies another session member's SETA status change to THEIR
+      proxy (if we have one for them). Looks the objectId up by owner NAME
+      (`$XMP.ProxyObjectIdByOwner`, populated in XMP_Arena_HandleSpawn) since a
+      session message is about a PLAYER, not a specific ship/objectId. Silently
+      does nothing if we don't have (or no longer have) a proxy for that name,
+      e.g. a race between them leaving the sector and this arriving, or simply
+      an action this cue doesn't act on (join/leave/ready/countdown).
+    -->
+    <cue name="XMP_Arena_HandleSetaStatus" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'action'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.RxAction" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.RxAction == 'seta_on' or $XMP.RxAction == 'seta_off'">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'playerName'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.RxPlayerName" exact="$XMP.ExtractValue" />
+
+              <do_if value="$XMP.ProxyObjectIdByOwner.{$XMP.RxPlayerName}.exists">
+                <do_all>
+                  <set_value name="$XMP.SetaObjectId" exact="$XMP.ProxyObjectIdByOwner.{$XMP.RxPlayerName}" />
+                  <set_value name="$XMP.Proxies.{$XMP.SetaObjectId}.blackboard.$XMP_Frozen" exact="$XMP.RxAction == 'seta_on'" />
+                  <do_if value="$XMP.RxAction == 'seta_on'">
+                    <do_all>
+                      <debug_text text="'[XMultiplayer][Arena] ' + $XMP.RxPlayerName + ' activated SETA (proxy frozen)'" filter="general" />
+                    </do_all>
+                    <else>
+                      <debug_text text="'[XMultiplayer][Arena] ' + $XMP.RxPlayerName + ' left SETA (proxy resumed)'" filter="general" />
+                    </else>
+                  </do_if>
+                </do_all>
+              </do_if>
+            </do_all>
+          </do_if>
+        </do_all>
+      </actions>
     </cue>
   </cues>
 </mdscript>

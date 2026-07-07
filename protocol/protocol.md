@@ -65,30 +65,38 @@ respawn by re-sending the SAME `objectId` instead).
 | `maxHull` | number (optional, A4) | Starting hull for the server's HP authority (`server/src/hpTracker.ts`). Falls back to `DEFAULT_HULL` (`src/combat.ts`) if absent. |
 | `maxShield` | number (optional, A4) | Starting shield, same fallback pattern (`DEFAULT_SHIELD`). |
 
-**Explicit v1 balancing simplification:** every ship gets the same starting
-hull/shield regardless of `shipType` today. `mod/md/XMP_Arena.xml`'s
-`XMP_Arena_AnnounceSpawn` sends `maxHull`/`maxShield` on every spawn, but always
-the same fixed numbers (`$XMP.CombatDefaultMaxHull`/`$XMP.CombatDefaultMaxShield`,
-currently 100/100, matching `DEFAULT_HULL`/`DEFAULT_SHIELD`) -- there is no
-per-shiptype table yet, so a heavy destroyer and a light scout currently start
-combat with identical HP. The field exists specifically so this can change
-without another protocol version bump: real per-shiptype (or per-loadout) values
-are expected to land alongside A5's loadout work, at which point
-`XMP_Arena_AnnounceSpawn` would read them from the ship's actual macro/loadout
-instead of the two fixed constants.
+**maxHull/maxShield, from A5 on:** `mod/md/XMP_Arena.xml`'s `XMP_Arena_OnEnterSector`
+(fired when the player enters the Arena sector, replacing A1-A4's
+`XMP_Arena_AnnounceSpawn`, which spawned unconditionally at connect time
+regardless of location) sends the ship's actual `player.entity.hullmax`/
+`shieldmax` rather than a fixed constant -- so different ship types genuinely do
+start combat with different HP now, at least in principle. This is still one of
+the least-confirmed assumptions in the whole mod (see
+`docs/A5-messprotokoll.md`): X4 may expose hull/shield as a 0..1 fraction rather
+than absolute points in other contexts, which this cue does not convert. Loadout
+(`spawn.loadout`) is NOT populated yet -- enumerating equipped weapons needs an
+assumed collection-iteration API with no existing pattern elsewhere in this
+codebase to anchor a guess on, so it's deferred rather than risk breaking the
+whole spawn sequence on a wrong guess (see `docs/A5-messprotokoll.md` for what to
+try once the real weapon-enumeration API is confirmed in-game). `DEFAULT_HULL`/
+`DEFAULT_SHIELD` remain the server-side fallback if `maxHull`/`maxShield` are
+ever absent (e.g. an older sender, or these fields turning out to need to be
+omitted after all).
 
 ### `despawn`
-**Direction:** server -> clients under normal operation (disconnect, or a
-server-triggered destruction, see `hp_state` below). If a client ever sends one
-itself (not part of the normal flow, but parsed the same way), the server since A4
-only accepts it, and forwards it, if the sender actually owns that `objectId` --
-same ownership check as `state_update`/`fire_event` below.
+**Direction:** server -> clients (disconnect, or a server-triggered destruction,
+see `hp_state` below) OR, since A5, client -> server -> other clients (the mod
+sends one itself when the player leaves the Arena sector,
+`XMP_Arena_OnExitSector`, `reason: "left_sector"`). Either way the server only
+accepts and forwards a client-sent one if the sender actually owns that
+`objectId` (A4 ownership authority, same check as `state_update`/`fire_event`
+below).
 **Purpose:** Announce removal of a previously spawned object.
 
 | Field | Type | Notes |
 |---|---|---|
 | `objectId` | string | Identifier of the object to remove. |
-| `reason` | string (optional) | Free-form reason (`"session_end"`, `"destroyed"`, `"disconnect"`, ...). |
+| `reason` | string (optional) | Free-form reason (`"session_end"`, `"destroyed"`, `"disconnect"`, `"left_sector"` (A5), ...). |
 
 ### `hit_report`
 **Direction:** client -> server only (A4). Never forwarded to other clients raw --
@@ -143,26 +151,42 @@ data to relay; A4 substantially expands that:
 
 | Check | Where | Rejects |
 |---|---|---|
-| Ship macro whitelist | `agent/src/relayFilter.ts` (`decideRelay`) | `spawn` with a `shipType` outside `SHIP_MACRO_WHITELIST`. |
-| Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`), `protocol/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
+| Ship macro whitelist | `agent/src/relayFilter.ts` (`decideRelay`) AND `server/src/server.ts` (A5: closes a gap where only the agent checked this) | `spawn` with a `shipType` outside `SHIP_MACRO_WHITELIST`. |
+| Ship class rule preset (A5) | `server/src/shipClassPolicy.ts` (`isShipClassAllowed`), `--ships`/`XMP_SHIPS` | `spawn` with a `shipType` whose class isn't in the configured preset (`s`\|`m`\|`sm`\|`all`). |
+| Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`) AND `server/src/server.ts` (A5: same gap-closing rationale as the whitelist above), `protocol/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
 | Orphan filter | `agent/src/relayFilter.ts` (`decideRelay`) | `state_update`/`hit_report` for a `shipId`/`targetId` with no known spawn -- also what keeps the agent's `LatencyTracker` map bounded. |
-| Ownership authority | `server/src/server.ts`, `server/src/sessionManager.ts` (`ownerOf`) | `spawn`/`state_update`/`despawn`/`fire_event` referencing an `objectId` the sender does not own. |
+| Ownership authority | `server/src/server.ts` (`requireOwnership`), `server/src/sessionManager.ts` (`ownerOf`) | `spawn`/`state_update`/`despawn`/`fire_event` referencing an `objectId` the sender does not own. |
 | Spawn cap | `server/src/sessionManager.ts` (`hasOtherActiveSpawn`) | A second, different `objectId` spawned by a client that already has one active. |
+| Respawn gate (A5) | `server/src/server.ts` | A `spawn` for an `objectId` the sender STILL actively owns (not yet destroyed/despawned) -- closes a free, unlimited self-heal (`hp.register()` resets HP unconditionally). |
 | Damage validation | `server/src/hpTracker.ts` (`isValidDamageClaim`, `clampDamage`) | Non-finite, zero, or negative `damage`; clamps anything above `MAX_DAMAGE_PER_HIT`. |
 | Message size | `protocol/src/parse.ts`, `agent/src/ndjson.ts`, the relay's `maxPayload` | Any message over `MAX_MESSAGE_BYTES`. |
+| Per-client rate limit (A5) | `server/src/rateLimiter.ts` (`TokenBucket`) | Any message beyond the general per-client rate; `hit_report` additionally has its own, tighter limit on top. |
+| Connection/session limits (A5) | `server/src/server.ts` | A new WebSocket connection beyond `maxConnections`/`maxConnectionsPerIp`; a `session` `join` that would create a new session beyond `maxSessions` (joining an EXISTING session is never affected). |
+| Session-code entropy (A5, `--public`/`XMP_PUBLIC`) | `server/src/server.ts` (`isSessionCodeAllowedInPublicMode`) | In public mode only: the LAN default `"arena"`, or any `sessionCode` shorter than `MIN_PUBLIC_SESSION_CODE_LENGTH` (12). |
+| String sanitizing (A5) | `protocol/src/sanitize.ts`, `server/src/server.ts` (logging + broadcast), `agent/src/pipeSanitize.ts` (pipe-bound, additionally strips `{`/`}`/`,` to protect MD's field extractor) | Control characters and excess length in `playerName`/`chat.from`/`chat.text` -- sanitized, not rejected outright. |
 
-See `docs/A4-messprotokoll.md` for the reasoning behind each of the A4 additions.
+See `docs/A4-messprotokoll.md`/`docs/A5-messprotokoll.md` for the reasoning behind each addition.
 
 ### `session`
 **Direction:** client <-> server.
-**Purpose:** Join/leave/ready/countdown lifecycle for a session (lobby).
+**Purpose:** Join/leave lifecycle for a session. Since A5 ("Drop-in-Arena statt
+Lobby", explicit developer decision) there is no lobby, ready-check, or
+countdown UI: `join`/`leave` are sent automatically by the mod when it detects
+the player entering/leaving the Arena sector (`XMP_Arena_OnEnterSector`/
+`XMP_Arena_OnExitSector`), never from a player-facing dialog. `"ready"`/
+`"countdown"` remain in the type for now but are unused/vestigial -- nothing
+sends or handles them -- rather than a breaking removal of a wire type that
+cost nothing to leave in place. A client-sent `leave` is fully processed
+server-side (not just rebroadcast): it removes session membership and despawns/
+forgets HP for whatever that client had spawned, exactly like a disconnect does
+(A5 review fix, `server/src/server.ts`'s `leaveSession`).
 
 | Field | Type | Notes |
 |---|---|---|
 | `action` | `"join"` \| `"leave"` \| `"ready"` \| `"countdown"` | |
-| `sessionCode` | string | Session/lobby identifier both players agree on out-of-band. |
+| `sessionCode` | string | Session identifier both sides agree on; `"arena"` is the LAN default both the agent (`agent/src/config.ts`) and the mod (`XMP_Arena_OnEnterSector`) fall back to when nothing else overrides it. |
 | `playerName` | string (optional) | Display name, expected on `join`. |
-| `countdownSeconds` | number (optional) | Only meaningful for `action === "countdown"`. |
+| `countdownSeconds` | number (optional) | Unused/vestigial, see above. |
 
 ### `chat`
 **Direction:** client -> server -> other clients in the session.

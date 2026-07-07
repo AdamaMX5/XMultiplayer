@@ -6,4 +6,21 @@
       <component ref="standardzone" />
     </macro>
   </zone>
+
+  <!-- A5 map variants, see clusters.xml/sectors.xml. -->
+  <zone name="XMP_Arena_Zone_Asteroid" instantiate="1">
+    <macro name="XMP_Arena_Zone_Asteroid_macro" class="zone">
+      <component ref="standardzone" />
+    </macro>
+  </zone>
+  <zone name="XMP_Arena_Zone_Debris" instantiate="1">
+    <macro name="XMP_Arena_Zone_Debris_macro" class="zone">
+      <component ref="standardzone" />
+    </macro>
+  </zone>
+  <zone name="XMP_Arena_Zone_Nebula" instantiate="1">
+    <macro name="XMP_Arena_Zone_Nebula_macro" class="zone">
+      <component ref="standardzone" />
+    </macro>
+  </zone>
 </zones>

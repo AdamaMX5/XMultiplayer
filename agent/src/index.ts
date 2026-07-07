@@ -1,4 +1,4 @@
-import { parseMessage } from "@xmultiplayer/protocol";
+import { parseMessage, type SessionMessage } from "@xmultiplayer/protocol";
 import { parseConfig, pipePath } from "./config.js";
 import { PipeServer } from "./pipeServer.js";
 import { ReconnectingWebSocket } from "./wsClient.js";
@@ -8,12 +8,18 @@ import { buildPipeLine } from "./pipeMessage.js";
 import { createRelayStats, resetWindow } from "./relayStats.js";
 import { estimateLatencyMs } from "./latency.js";
 import { LatencyTracker } from "./latencyTracker.js";
+import { SessionState } from "./sessionState.js";
+import { sanitizeForPipe } from "./pipeSanitize.js";
 
 const config = parseConfig(process.argv.slice(2), process.env);
 const stats = createStats();
 const relayStats = createRelayStats();
 /** Smoothed per-sender link latency (see agent/src/latencyTracker.ts); reset whenever a sender's spawn/despawn is seen, so a respawn/reconnect starts fresh. */
 const latencyTracker = new LatencyTracker();
+/** A5: what to resend after a WS reconnect (last session-join, last own spawn) -- see sessionState.ts. */
+const sessionState = new SessionState();
+/** True once the WS has connected at least once, so onOpen can tell a genuine reconnect apart from the very first connect. */
+let hasConnectedBefore = false;
 
 /**
  * Locally cached copy of every currently-known remote spawn (objectId -> pipe-ready
@@ -39,12 +45,45 @@ const knownSpawns = new Map<string, string>();
  */
 const knownObjectIds = new Set<string>();
 
+/**
+ * A5 "Drop-in-Arena": joining a session is no longer a fixed, connect-time
+ * event by default -- the mod is expected to send its own `session` join once
+ * it detects the player actually entering the Arena sector (presence-based
+ * drop-in), which flows through generically via handleLine below, same as any
+ * other outbound message. The one case that STILL auto-joins at connect time is
+ * an explicit --session/XMP_SESSION override (config.sessionCodeExplicit):
+ * needed for the simulator (agent/src/simulate.ts) and the e2e tests, neither
+ * of which has a "mod" to send a join, and for an operator who wants a private/
+ * fixed session regardless of presence detection.
+ *
+ * On a RECONNECT (not the first connect), the relay server has forgotten this
+ * connection entirely -- a fresh WebSocket means a fresh clientId server-side,
+ * with no session membership and no recorded spawn (server/src/sessionManager.ts
+ * has no notion of "this is the same player reconnecting"). sessionState (see
+ * sessionState.ts) remembers the last outbound join/spawn specifically so they
+ * can be resent here, restoring session membership automatically instead of
+ * leaving the agent connected but silently absent from its own session.
+ */
 const ws = new ReconnectingWebSocket({
   url: config.serverUrl,
   onOpen: () => {
     console.log(`[agent] connected to relay server at ${config.serverUrl}`);
-    ws.send(
-      JSON.stringify({
+    if (hasConnectedBefore) {
+      // The server is about to replay this session's current spawns as part of
+      // processing our re-join below; clear the local cache first so a spawn
+      // that's now stale (e.g. someone else despawned while we were
+      // disconnected, so we never saw their despawn) can't survive alongside
+      // the fresh replay -- the replay REPLACES this cache, it doesn't merge
+      // with whatever was in it before the disconnect.
+      knownSpawns.clear();
+      knownObjectIds.clear();
+      const resend = sessionState.resendLines();
+      if (resend.length > 0) {
+        console.log(`[agent] reconnect: restoring session (${resend.length} line(s): join${resend.length > 1 ? " + own spawn" : ""})`);
+      }
+      for (const line of resend) ws.send(line);
+    } else if (config.sessionCodeExplicit) {
+      const joinMsg: SessionMessage = {
         v: 1,
         type: "session",
         action: "join",
@@ -52,8 +91,12 @@ const ws = new ReconnectingWebSocket({
         ts: Date.now(),
         sessionCode: config.sessionCode,
         playerName: config.playerName,
-      })
-    );
+      };
+      const line = JSON.stringify(joinMsg);
+      ws.send(line);
+      sessionState.observeOutbound(joinMsg, line);
+    }
+    hasConnectedBefore = true;
   },
   onClose: () => console.log("[agent] relay connection lost, retrying..."),
   // A2: other session members' spawn/despawn/state_update messages get relayed
@@ -91,6 +134,11 @@ function handleLine(line: string): void {
     return;
   }
   const msg = result.message;
+  // A5: MD sends its own session join/leave (and spawn/despawn) here once it
+  // detects sector presence -- no special-casing needed, it flows through like
+  // any other outbound line. sessionState just needs to see every one of them to
+  // stay current for a future reconnect (see the ws onOpen handler above).
+  sessionState.observeOutbound(msg, line);
   if (msg.type === "state_update") {
     recordSeq(stats, msg.seq);
     stats.lastPosition = msg.position;
@@ -135,7 +183,13 @@ function handleRemoteMessage(line: string): void {
   if (msg.type === "despawn") latencyTracker.reset(msg.objectId);
 
   const linkLatencyMs = msg.type === "state_update" ? latencyTracker.update(msg.shipId, estimateLatencyMs(msg.ts)) : undefined;
-  const pipeLine = buildPipeLine(msg, linkLatencyMs);
+  // A5 security hardening: playerName/chat text are free-form, player-supplied
+  // strings the server only sanitizes for ITS OWN logging/broadcast purposes
+  // (control chars + length); MD's naive string-search field extractor has its
+  // own, additional gap (a literal '{'/'}'/',' inside a value breaks it, see
+  // pipeSanitize.ts), so the agent sanitizes again, more aggressively, right
+  // before anything reaches the pipe.
+  const pipeLine = buildPipeLine(sanitizeForPipe(msg), linkLatencyMs);
   if (msg.type === "spawn") {
     knownSpawns.set(msg.objectId, pipeLine);
     knownObjectIds.add(msg.objectId);

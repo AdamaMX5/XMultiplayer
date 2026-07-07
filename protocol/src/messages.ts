@@ -101,14 +101,26 @@ export interface FireEventMessage extends EnvelopeBase {
   direction: Vector3;
 }
 
-export type SessionAction = "join" | "leave" | "ready" | "countdown";
+/**
+ * "ready"/"countdown" are vestigial: A5 ("Drop-in-Arena statt Lobby", explicit
+ * developer decision) removed the lobby/ready-check/countdown UI entirely, but
+ * left these two action values in the type rather than a breaking removal of a
+ * wire value that costs nothing to keep. "seta_on"/"seta_off" (A5): a client
+ * broadcasts these when it detects the LOCAL player activating/deactivating
+ * SETA (time acceleration) or pausing, so the other session member(s) can show
+ * a notification and freeze that player's proxy (real ship state elsewhere
+ * stops updating meaningfully during SETA/pause, so extrapolating its motion
+ * would just drift) -- see mod/md/XMP_Arena.xml's XMP_Arena_OnSetaChanged/
+ * XMP_Arena_HandleSetaStatus and docs/A5-messprotokoll.md.
+ */
+export type SessionAction = "join" | "leave" | "ready" | "countdown" | "seta_on" | "seta_off";
 
 export interface SessionMessage extends EnvelopeBase {
   type: "session";
   action: SessionAction;
   sessionCode: string;
   playerName?: string;
-  /** Only meaningful for action === "countdown". */
+  /** Only meaningful for action === "countdown" (vestigial, see SessionAction). */
   countdownSeconds?: number;
 }
 

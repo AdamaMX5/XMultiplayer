@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { WebSocket, type WebSocketServer } from "ws";
 import { DEFAULT_HULL, MAX_DAMAGE_PER_HIT, MAX_MESSAGE_BYTES } from "@xmultiplayer/protocol";
-import { startRelayServer } from "../src/server.js";
+import { startRelayServer, type RelayServerOptions } from "../src/server.js";
 
 function once(emitter: { once: (event: string, cb: (...args: unknown[]) => void) => void }, event: string): Promise<unknown> {
   return new Promise((resolve) => emitter.once(event, resolve));
 }
 
-async function startTestServer(): Promise<{ wss: WebSocketServer; port: number }> {
-  const wss = startRelayServer({ port: 0 });
+async function startTestServer(options: Omit<RelayServerOptions, "port"> = {}): Promise<{ wss: WebSocketServer; port: number }> {
+  const wss = startRelayServer({ port: 0, ...options });
   await once(wss, "listening");
   const port = (wss.address() as AddressInfo).port;
   return { wss, port };
@@ -21,11 +21,15 @@ function joinMessage(sessionCode: string, playerName: string) {
 }
 
 function spawnMessage(objectId: string, owner: string) {
-  return JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId, shipType: "ship_generic_fighter_01", owner });
+  return JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId, shipType: "ship_arg_s_fighter_01_a_macro", owner });
 }
 
 function hitReportMessage(targetId: string, sourceId: string, damage: number, damageType: "hull" | "shield" = "hull") {
   return JSON.stringify({ v: 1, type: "hit_report", seq: 0, ts: Date.now(), targetId, sourceId, damage, damageType });
+}
+
+function despawnMessage(objectId: string) {
+  return JSON.stringify({ v: 1, type: "despawn", seq: 0, ts: Date.now(), objectId });
 }
 
 test("two clients in the same session receive each other's state_update but not their own", async () => {
@@ -240,6 +244,84 @@ test("a spawn message is broadcast to existing session members", async () => {
   wss.close();
 });
 
+test("A5: the server itself rejects a spawn with a shipType outside the macro whitelist (not just the agent)", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-9b", "Alice"));
+  b.send(joinMessage("arena-9b", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  let received = false;
+  b.on("message", () => (received = true));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "totally_made_up_macro", owner: "Alice" }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "a client connecting directly to the WebSocket (bypassing the agent's own whitelist check) must still be rejected server-side");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 ship class rule preset: a spawn outside the configured preset is rejected, one inside it is accepted", async () => {
+  const { wss, port } = await startTestServer({ shipClassPreset: "s" }); // S-class only arena
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-9c", "Alice"));
+  b.send(joinMessage("arena-9c", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  let received = false;
+  b.on("message", () => (received = true));
+  a.send(
+    JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_m_corvette_01_a_macro", owner: "Alice" })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "an M-class ship must be rejected under an S-only preset");
+
+  const spawnReceived = once(b, "message");
+  a.send(spawnMessage("ship-alice", "Alice")); // S-class, from the shared helper
+  const raw = await spawnReceived;
+  assert.equal(JSON.parse((raw as Buffer).toString()).type, "spawn", "an S-class ship must still be accepted under an S-only preset");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 kill-feed: destruction broadcasts a chat message naming both the attacker and the victim", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-killfeed", "Alice"));
+  b.send(joinMessage("arena-killfeed", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  b.send(spawnMessage("ship-bob", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const aMessages: string[] = [];
+  a.on("message", (data) => aMessages.push(data.toString()));
+  b.send(JSON.stringify({ v: 1, type: "hit_report", seq: 0, ts: Date.now(), targetId: "ship-alice", sourceId: "ship-bob", damage: DEFAULT_HULL, damageType: "hull" }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const parsedA = aMessages.map((m) => JSON.parse(m));
+  const killFeed = parsedA.find((m) => m.type === "chat");
+  assert.ok(killFeed, `victim must also receive the kill-feed chat message, got: ${aMessages.join(", ")}`);
+  assert.equal(killFeed.from, "server");
+  assert.equal(killFeed.text, "Bob destroyed Alice");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
 test("a late-joining member is replayed previously spawned proxies", async () => {
   const { wss, port } = await startTestServer();
   const a = new WebSocket(`ws://localhost:${port}`);
@@ -379,7 +461,7 @@ test("A4 spawn cap: a second, different objectId from the same member is rejecte
   wss.close();
 });
 
-test("A4 spawn cap: re-spawning the SAME objectId is allowed (respawn), not blocked by the cap", async () => {
+test("A4 spawn cap: re-spawning the SAME objectId is allowed (respawn) after a proper despawn, not blocked by the cap", async () => {
   const { wss, port } = await startTestServer();
   const a = new WebSocket(`ws://localhost:${port}`);
   const b = new WebSocket(`ws://localhost:${port}`);
@@ -394,14 +476,64 @@ test("A4 spawn cap: re-spawning the SAME objectId is allowed (respawn), not bloc
 
   a.send(spawnMessage("ship-alice", "Alice"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  a.send(spawnMessage("ship-alice", "Alice")); // same objectId again: a respawn, not a cap violation
+  // A5 respawn gate: a still-active objectId cannot simply be re-spawned (that
+  // would be a free self-heal); despawn it properly first, THEN respawn.
+  a.send(despawnMessage("ship-alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   const spawnedIds = bMessages
     .map((m) => JSON.parse(m))
     .filter((m) => m.type === "spawn")
     .map((m) => m.objectId);
-  assert.deepEqual(spawnedIds, ["ship-alice", "ship-alice"], "re-spawning the same objectId must still be broadcast both times");
+  assert.deepEqual(spawnedIds, ["ship-alice", "ship-alice"], "respawning the same objectId after a proper despawn must still be broadcast both times");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 respawn gate: re-spawning a STILL-ACTIVE objectId (no destruction/despawn in between) is rejected, closing a self-heal exploit", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-respawn-gate", "Alice"));
+  b.send(joinMessage("arena-respawn-gate", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  b.send(spawnMessage("ship-bob", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Damage Alice's ship first, so a successful "self-heal" would be observable
+  // (hp.register() resets to full hull/shield).
+  const aMessages: string[] = [];
+  a.on("message", (data) => aMessages.push(data.toString()));
+  b.send(hitReportMessage("ship-alice", "ship-bob", 40, "hull"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const damagedState = aMessages.map((m) => JSON.parse(m)).find((m) => m.type === "hp_state");
+  assert.ok(damagedState);
+  assert.equal(damagedState.hull, 60);
+
+  // Attempt the exploit: re-spawn the SAME still-alive objectId, hoping it resets HP.
+  aMessages.length = 0;
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(
+    !aMessages.map((m) => JSON.parse(m)).some((m) => m.type === "spawn"),
+    "the re-spawn attempt on a still-active objectId must be rejected, not broadcast"
+  );
+
+  // Confirm no heal happened: a further hit must apply on top of the ALREADY
+  // reduced hull (60), not on a freshly reset 100.
+  aMessages.length = 0;
+  b.send(hitReportMessage("ship-alice", "ship-bob", 10, "hull"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const afterAttemptedHeal = aMessages.map((m) => JSON.parse(m)).find((m) => m.type === "hp_state");
+  assert.ok(afterAttemptedHeal);
+  assert.equal(afterAttemptedHeal.hull, 50, "hull must continue from 60 (not reset to 100 by the rejected respawn), i.e. 60 - 10 = 50");
 
   a.close();
   b.close();
@@ -414,9 +546,12 @@ test("respawning the same objectId replays only the newest spawn to a late joine
   await once(a, "open");
   a.send(joinMessage("arena-15", "Alice"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "old_type", owner: "Alice" }));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice" }));
   await new Promise((resolve) => setTimeout(resolve, 50));
-  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "new_type", owner: "Alice" }));
+  // A5 respawn gate: a still-active objectId cannot simply be re-spawned; despawn first.
+  a.send(despawnMessage("ship-alice"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_s_fighter_02_a_macro", owner: "Alice" }));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   const b = new WebSocket(`ws://localhost:${port}`);
@@ -428,7 +563,7 @@ test("respawning the same objectId replays only the newest spawn to a late joine
 
   const spawnsReplayed = receivedByB.map((m) => JSON.parse(m)).filter((m) => m.type === "spawn" && m.objectId === "ship-alice");
   assert.equal(spawnsReplayed.length, 1, "must not replay both the old and the new spawn for the same objectId");
-  assert.equal(spawnsReplayed[0].shipType, "new_type");
+  assert.equal(spawnsReplayed[0].shipType, "ship_arg_s_fighter_02_a_macro");
 
   a.close();
   b.close();
@@ -687,7 +822,7 @@ test("FIXED: a spawn claiming an absurdly large maxHull falls back to DEFAULT_HU
   // Alice's own spawn message claims an absurd starting hull -- exactly the kind of
   // client-supplied number that must not be trusted unbounded (same trust-boundary
   // rationale as clampDamage/isValidDamageClaim for hit_report.damage).
-  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_generic_fighter_01", owner: "Alice", maxHull: 1e308, maxShield: 0 }));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", maxHull: 1e308, maxShield: 0 }));
   b.send(spawnMessage("ship-bob", "Bob"));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -716,7 +851,7 @@ test("FIXED: a spawn claiming a negative maxHull falls back to DEFAULT_HULL inst
   a.send(joinMessage("arena-24", "Alice"));
   b.send(joinMessage("arena-24", "Bob"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_generic_fighter_01", owner: "Alice", maxHull: -5, maxShield: -1 }));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", maxHull: -5, maxShield: -1 }));
   b.send(spawnMessage("ship-bob", "Bob"));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -739,7 +874,7 @@ test("a plausible maxHull/maxShield within range is honored as-is", async () => 
   a.send(joinMessage("arena-25", "Alice"));
   b.send(joinMessage("arena-25", "Bob"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_generic_fighter_01", owner: "Alice", maxHull: 500, maxShield: 200 }));
+  a.send(JSON.stringify({ v: 1, type: "spawn", seq: 0, ts: Date.now(), objectId: "ship-alice", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", maxHull: 500, maxShield: 200 }));
   b.send(spawnMessage("ship-bob", "Bob"));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -1044,6 +1179,347 @@ test("a hit_report with invalid damage (zero/negative) is dropped at the full se
   wss.close();
 });
 
+test("A5 review fix: switching sessions (join a DIFFERENT session while already in one) despawns the old session's spawns for remaining members, forgets their HP, and does not leave a ghost for a late joiner of the old session", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  // Alice and Bob both start in session A (the "old sector").
+  a.send(joinMessage("arena-switch-a", "Alice"));
+  b.send(joinMessage("arena-switch-a", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  b.send(spawnMessage("ship-bob", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  // Alice "walks into a different sector": joins session B without ever disconnecting.
+  a.send(joinMessage("arena-switch-b", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const parsedByB = bMessages.map((m) => JSON.parse(m));
+  const leaveMsg = parsedByB.find((m) => m.type === "session" && m.action === "leave");
+  assert.ok(leaveMsg, `Bob (remaining in the old session) must see a session leave for Alice, got: ${bMessages.join(", ")}`);
+  assert.equal(leaveMsg.playerName, "Alice");
+  const despawnMsg = parsedByB.find((m) => m.type === "despawn");
+  assert.ok(despawnMsg, `Bob must see ship-alice despawned from the old session, got: ${bMessages.join(", ")}`);
+  assert.equal(despawnMsg.objectId, "ship-alice");
+  assert.equal(despawnMsg.reason, "disconnect", "a session switch is modeled the same way a disconnect's cleanup is, not a combat destruction");
+
+  // A late joiner of the OLD session must not be replayed a ghost spawn for ship-alice.
+  const c = new WebSocket(`ws://localhost:${port}`);
+  await once(c, "open");
+  const cSpawnedIds: string[] = [];
+  c.on("message", (data) => {
+    const m = JSON.parse(data.toString());
+    if (m.type === "spawn") cSpawnedIds.push(m.objectId);
+  });
+  c.send(joinMessage("arena-switch-a", "Carol"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.ok(!cSpawnedIds.includes("ship-alice"), "ship-alice must not be replayed as a ghost spawn in the old session");
+  assert.ok(cSpawnedIds.includes("ship-bob"), "ship-bob (Bob never left) must still be replayed normally");
+
+  // HP for ship-alice in the OLD session must be gone too: a hit_report against it
+  // from Bob (still in session A, owns ship-bob) must produce no hp_state at all.
+  let bobSawHpState = false;
+  b.on("message", (data) => {
+    if (JSON.parse(data.toString()).type === "hp_state") bobSawHpState = true;
+  });
+  b.send(hitReportMessage("ship-alice", "ship-bob", 10, "hull"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(bobSawHpState, false, "ship-alice's HP must have been forgotten along with its spawn record when Alice switched sessions");
+
+  a.close();
+  b.close();
+  c.close();
+  wss.close();
+});
+
+test("switching to the SAME sessionCode again is not treated as a session switch (no spurious despawn/leave)", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-resame", "Alice"));
+  b.send(joinMessage("arena-resame", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  a.send(joinMessage("arena-resame", "Alice")); // re-joins the SAME session
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const parsedByB = bMessages.map((m) => JSON.parse(m));
+  assert.ok(!parsedByB.some((m) => m.type === "despawn"), "re-joining the same session must not despawn the member's own still-valid spawn");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 general rate limit: a client exceeding the configured message rate has further messages dropped", async () => {
+  const { wss, port } = await startTestServer({ generalRateLimit: { capacity: 2, refillPerSecond: 1 } });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-ratelimit", "Alice")); // consumes 1 of the 2 tokens
+  b.send(joinMessage("arena-ratelimit", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  a.send(JSON.stringify({ v: 1, type: "chat", seq: 1, ts: Date.now(), from: "Alice", text: "1" })); // consumes the 2nd token
+  a.send(JSON.stringify({ v: 1, type: "chat", seq: 2, ts: Date.now(), from: "Alice", text: "2" })); // no tokens left, must be dropped
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const chatTexts = bMessages.map((m) => JSON.parse(m)).filter((m) => m.type === "chat").map((m) => m.text);
+  assert.deepEqual(chatTexts, ["1"], "the message beyond the rate limit must be dropped");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 hit_report rate limit: a SEPARATE, tighter limit applies specifically to hit_report", async () => {
+  const { wss, port } = await startTestServer({ hitReportRateLimit: { capacity: 1, refillPerSecond: 1 } });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-hitratelimit", "Alice"));
+  b.send(joinMessage("arena-hitratelimit", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  b.send(spawnMessage("ship-bob", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const aMessages: string[] = [];
+  a.on("message", (data) => aMessages.push(data.toString()));
+  b.send(hitReportMessage("ship-alice", "ship-bob", 10, "hull")); // consumes the only token
+  b.send(hitReportMessage("ship-alice", "ship-bob", 10, "hull")); // no tokens left, must be dropped
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const hpStates = aMessages.map((m) => JSON.parse(m)).filter((m) => m.type === "hp_state");
+  assert.equal(hpStates.length, 1, "only the first hit_report should have been processed");
+  assert.equal(hpStates[0].hull, 90);
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 connection limits: a connection beyond maxConnections is rejected", async () => {
+  const { wss, port } = await startTestServer({ maxConnections: 1 });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  const bClosed = once(b, "close");
+  await bClosed;
+
+  a.close();
+  wss.close();
+});
+
+test("A5 connection limits: a connection beyond maxConnectionsPerIp is rejected (loopback counts as one IP)", async () => {
+  const { wss, port } = await startTestServer({ maxConnectionsPerIp: 1 });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+
+  const b = new WebSocket(`ws://localhost:${port}`);
+  const bClosed = once(b, "close");
+  await bClosed;
+
+  a.close();
+  wss.close();
+});
+
+test("A5 max sessions: joining a NEW session beyond maxSessions is rejected, but joining an EXISTING one never is", async () => {
+  const { wss, port } = await startTestServer({ maxSessions: 1 });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  const c = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open"), once(c, "open")]);
+
+  a.send(joinMessage("arena-first", "Alice")); // creates the one allowed session
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Bob joining the SAME session must still work even though the cap is reached.
+  const aMessages: string[] = [];
+  a.on("message", (data) => aMessages.push(data.toString()));
+  b.send(joinMessage("arena-first", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(
+    aMessages.map((m) => JSON.parse(m)).some((m) => m.type === "session" && m.action === "join" && m.playerName === "Bob"),
+    "joining an EXISTING session must never be blocked by the session cap"
+  );
+
+  // Carol trying to create a SECOND, different session must be rejected.
+  c.send(joinMessage("arena-second", "Carol"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  c.send(spawnMessage("ship-carol", "Carol"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // If Carol's join had succeeded, her spawn would be accepted and broadcast to
+  // nobody-in-particular (she'd be alone) -- the real proof is that a late
+  // joiner of "arena-second" sees nothing at all, i.e. the session never formed.
+  const late = new WebSocket(`ws://localhost:${port}`);
+  await once(late, "open");
+  const lateMessages: string[] = [];
+  late.on("message", (data) => lateMessages.push(data.toString()));
+  late.send(joinMessage("arena-second", "Dave"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(lateMessages.map((m) => JSON.parse(m)).filter((m) => m.type === "spawn"), [], "arena-second must never have formed, so there is nothing to replay");
+
+  a.close();
+  b.close();
+  c.close();
+  late.close();
+  wss.close();
+});
+
+test("A5 public mode: the LAN default sessionCode and overly short codes are rejected", async () => {
+  const { wss, port } = await startTestServer({ publicMode: true });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  await once(a, "open");
+
+  let received = false;
+  a.on("message", () => (received = true));
+  a.send(joinMessage("arena", "Alice")); // the well-known LAN default
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "the LAN default sessionCode must be rejected in public mode");
+
+  a.send(joinMessage("short", "Alice")); // shorter than MIN_PUBLIC_SESSION_CODE_LENGTH
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "an overly short sessionCode must be rejected in public mode");
+
+  a.close();
+  wss.close();
+});
+
+test("A5 public mode: a sufficiently long, non-default sessionCode is accepted", async () => {
+  const { wss, port } = await startTestServer({ publicMode: true });
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("a-sufficiently-long-private-code", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const received = once(a, "message");
+  b.send(joinMessage("a-sufficiently-long-private-code", "Bob"));
+  const raw = await received;
+  assert.equal(JSON.parse((raw as Buffer).toString()).playerName, "Bob");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 outside public mode, the LAN default sessionCode still works normally", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const received = once(a, "message");
+  b.send(joinMessage("arena", "Bob"));
+  const raw = await received;
+  assert.equal(JSON.parse((raw as Buffer).toString()).playerName, "Bob");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 string sanitizing: a chat message with control characters and excessive length is sanitized before being broadcast", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-sanitize-chat", "Alice"));
+  b.send(joinMessage("arena-sanitize-chat", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const received = once(b, "message");
+  a.send(JSON.stringify({ v: 1, type: "chat", seq: 1, ts: Date.now(), from: "Alice\nFAKE LOG LINE", text: "hi\r\nthere" + "x".repeat(500) }));
+  const raw = await received;
+  const parsed = JSON.parse((raw as Buffer).toString());
+  assert.equal(parsed.from, "AliceFAKE LOG LINE");
+  assert.ok(!parsed.text.includes("\n") && !parsed.text.includes("\r"));
+  assert.ok(parsed.text.length <= 256);
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5 string sanitizing: a playerName with control characters is sanitized both in what's stored and what's broadcast", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  b.send(joinMessage("arena-sanitize-name", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const received = once(b, "message");
+  a.send(joinMessage("arena-sanitize-name", "Alice\x1b[31mInjected"));
+  const raw = await received;
+  const parsed = JSON.parse((raw as Buffer).toString());
+  assert.equal(parsed.playerName, "Alice[31mInjected");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
+test("A5: the server itself rejects a state_update with a position outside plausible Arena bounds (not just the agent)", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-serverbounds", "Alice"));
+  b.send(joinMessage("arena-serverbounds", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  let received = false;
+  b.on("message", () => (received = true));
+  a.send(
+    JSON.stringify({
+      v: 1,
+      type: "state_update",
+      seq: 1,
+      ts: Date.now(),
+      shipId: "ship-alice",
+      position: { x: 999_999_999, y: 0, z: 0 },
+      rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+      velocity: { x: 0, y: 0, z: 0 },
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "a state_update outside plausible Arena bounds must be rejected server-side even from an owned shipId");
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
 test("leaving broadcasts a session leave event to remaining members", async () => {
   const { wss, port } = await startTestServer();
   const a = new WebSocket(`ws://localhost:${port}`);
@@ -1062,6 +1538,62 @@ test("leaving broadcasts a session leave event to remaining members", async () =
   assert.equal(parsed.action, "leave");
   assert.equal(parsed.playerName, "Alice");
 
+  b.close();
+  wss.close();
+});
+
+function leaveMessage(sessionCode: string, playerName: string) {
+  return JSON.stringify({ v: 1, type: "session", action: "leave", seq: 0, ts: Date.now(), sessionCode, playerName });
+}
+
+test("A5 fix: an explicit client-sent leave (not just a WS disconnect) actually removes session membership, not just a decorative broadcast", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-explicit-leave", "Alice"));
+  b.send(joinMessage("arena-explicit-leave", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  a.send(spawnMessage("ship-alice", "Alice"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+
+  a.send(leaveMessage("arena-explicit-leave", "Alice")); // still connected, just leaving the session
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const parsedByB = bMessages.map((m) => JSON.parse(m));
+  assert.ok(parsedByB.some((m) => m.type === "session" && m.action === "leave"), "Bob must see the leave broadcast");
+  const despawn = parsedByB.find((m) => m.type === "despawn");
+  assert.ok(despawn, "Alice's spawn must be despawned, proving real cleanup ran, not just a decorative broadcast");
+  assert.equal(despawn.objectId, "ship-alice");
+
+  // The real proof: Alice is no longer tracked as being in this session at all
+  // (before the fix, sessions.leave() was never called for this path, so a
+  // subsequent state_update would still have been accepted/broadcast as if she
+  // were still a member).
+  let received = false;
+  b.on("message", (data) => {
+    if (JSON.parse(data.toString()).type === "state_update") received = true;
+  });
+  a.send(
+    JSON.stringify({
+      v: 1,
+      type: "state_update",
+      seq: 1,
+      ts: Date.now(),
+      shipId: "ship-alice",
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+      velocity: { x: 0, y: 0, z: 0 },
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received, false, "Alice must no longer be treated as a member of the session she explicitly left");
+
+  a.close();
   b.close();
   wss.close();
 });

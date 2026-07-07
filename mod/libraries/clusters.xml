@@ -28,4 +28,68 @@
       </connections>
     </macro>
   </cluster>
+
+  <!--
+    A5 map variants (PlanMod.md 1.1): three additional, otherwise-identical
+    clusters, one per environment. Determinism (the A5 task's explicit
+    requirement) falls out for free here: this is static, hand-authored XML
+    shipped with the mod, not anything generated/randomized at runtime, so
+    both players loading the same mod version always see byte-identical
+    geometry; no sync mechanism of any kind is needed for that guarantee.
+    Each variant is its own cluster/sector/zone/gamestart quadruple (see
+    sectors.xml/zones.xml/galaxy.xml/gamestarts.xml) rather than a runtime
+    switch on the base Arena sector, mirroring how the base Arena itself is
+    reached only via its own dedicated gamestart (A2): picking a map variant
+    is picking a different gamestart to launch, nothing more dynamic than that.
+  -->
+  <cluster name="Cluster_XMP_Arena_Asteroid" instantiate="1">
+    <macro name="Cluster_XMP_Arena_Asteroid_macro" class="cluster">
+      <component ref="standardcluster" />
+      <properties>
+        <identification name="{20206,9010}" description="{20206,9011}" />
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Sector_Asteroid_connection" ref="sectors">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Cluster" ref="XMP_Arena_Sector_Asteroid_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </cluster>
+
+  <cluster name="Cluster_XMP_Arena_Debris" instantiate="1">
+    <macro name="Cluster_XMP_Arena_Debris_macro" class="cluster">
+      <component ref="standardcluster" />
+      <properties>
+        <identification name="{20206,9012}" description="{20206,9013}" />
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Sector_Debris_connection" ref="sectors">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Cluster" ref="XMP_Arena_Sector_Debris_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </cluster>
+
+  <cluster name="Cluster_XMP_Arena_Nebula" instantiate="1">
+    <macro name="Cluster_XMP_Arena_Nebula_macro" class="cluster">
+      <component ref="standardcluster" />
+      <properties>
+        <identification name="{20206,9014}" description="{20206,9015}" />
+      </properties>
+      <connections>
+        <connection name="XMP_Arena_Sector_Nebula_connection" ref="sectors">
+          <offset>
+            <position x="0" y="0" z="0" />
+          </offset>
+          <macro connection="Cluster" ref="XMP_Arena_Sector_Nebula_macro" />
+        </connection>
+      </connections>
+    </macro>
+  </cluster>
 </clusters>

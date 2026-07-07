@@ -1,12 +1,53 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { DEFAULT_HULL, DEFAULT_SHIELD, MAX_MESSAGE_BYTES, parseMessage, type HitReportMessage, type SessionMessage } from "@xmultiplayer/protocol";
+import {
+  DEFAULT_HULL,
+  DEFAULT_SHIELD,
+  isKnownShipMacro,
+  isPlausibleVelocity,
+  isWithinArenaBounds,
+  MAX_MESSAGE_BYTES,
+  parseMessage,
+  sanitizeChatText,
+  sanitizePlayerName,
+  type HitReportMessage,
+  type SessionMessage,
+} from "@xmultiplayer/protocol";
 import { SessionManager, type SessionMember } from "./sessionManager.js";
 import { clampDamage, HpTracker, isDestroyed, isValidDamageClaim, isValidStartingHp } from "./hpTracker.js";
+import { isShipClassAllowed, type ShipClassPreset } from "./shipClassPolicy.js";
+import { TokenBucket } from "./rateLimiter.js";
+
+/** A5 "Internet-Modus": in public mode, a session code must be at least this long (on top of not being the LAN default "arena") to be accepted. Not real entropy measurement, just a minimum-length bar cheap enough to enforce without a dependency. */
+export const MIN_PUBLIC_SESSION_CODE_LENGTH = 12;
+
+export interface RateLimitConfig {
+  capacity: number;
+  refillPerSecond: number;
+}
 
 export interface RelayServerOptions {
   port: number;
+  /** A5 "Regel-Presets": restricts which ship classes may spawn in this session, on top of the base macro whitelist. Defaults to "all" (no additional restriction). */
+  shipClassPreset?: ShipClassPreset;
+  /** A5 security hardening: per-client token bucket for ALL message types. Generous defaults so normal play (10Hz telemetry plus occasional combat/chat) is never affected. */
+  generalRateLimit?: RateLimitConfig;
+  /** A5 security hardening: a SEPARATE, tighter per-client token bucket specifically for hit_report (combat-critical, worth its own guard beyond the general limit). */
+  hitReportRateLimit?: RateLimitConfig;
+  /** A5 security hardening: max simultaneous WebSocket connections, total and per remote IP. */
+  maxConnections?: number;
+  maxConnectionsPerIp?: number;
+  /** A5 security hardening: max simultaneous sessions. Joining an session that already exists never counts against this. */
+  maxSessions?: number;
+  /** A5 "Internet-Modus": when true, session join enforces MIN_PUBLIC_SESSION_CODE_LENGTH and rejects the LAN default "arena". Defaults to false (LAN behavior unchanged). */
+  publicMode?: boolean;
 }
+
+const DEFAULT_GENERAL_RATE_LIMIT: RateLimitConfig = { capacity: 60, refillPerSecond: 30 };
+const DEFAULT_HIT_REPORT_RATE_LIMIT: RateLimitConfig = { capacity: 20, refillPerSecond: 20 };
+const DEFAULT_MAX_CONNECTIONS = 500;
+const DEFAULT_MAX_CONNECTIONS_PER_IP = 50;
+const DEFAULT_MAX_SESSIONS = 1000;
 
 /**
  * Relay server: groups WebSocket clients into sessions by session code and
@@ -25,16 +66,56 @@ export function startRelayServer(options: RelayServerOptions): WebSocketServer {
   const sessions = new SessionManager();
   const hp = new HpTracker();
   const sockets = new Map<string, WebSocket>();
+  const shipClassPreset = options.shipClassPreset ?? "all";
+  const publicMode = options.publicMode ?? false;
+  const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+  const maxConnectionsPerIp = options.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP;
+  const generalRateLimit = options.generalRateLimit ?? DEFAULT_GENERAL_RATE_LIMIT;
+  const hitReportRateLimit = options.hitReportRateLimit ?? DEFAULT_HIT_REPORT_RATE_LIMIT;
+  const generalLimiter = new TokenBucket(generalRateLimit.capacity, generalRateLimit.refillPerSecond);
+  const hitReportLimiter = new TokenBucket(hitReportRateLimit.capacity, hitReportRateLimit.refillPerSecond);
+  // A5: connection-count limiting (total and per remote IP). ipByClient is needed
+  // purely so the "close" handler can decrement the right IP's counter -- the
+  // socket/request object isn't available there, only clientId.
+  let totalConnections = 0;
+  const connectionsByIp = new Map<string, number>();
+  const ipByClient = new Map<string, string>();
   let messagesSinceLastLog = 0;
 
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, req) => {
+    const ip = req.socket.remoteAddress ?? "unknown";
+    if (totalConnections >= maxConnections) {
+      console.warn(`[server] rejected connection from ${ip}: max total connections (${maxConnections}) reached`);
+      socket.close(1013, "server full");
+      return;
+    }
+    const connectionsFromThisIp = connectionsByIp.get(ip) ?? 0;
+    if (connectionsFromThisIp >= maxConnectionsPerIp) {
+      console.warn(`[server] rejected connection from ${ip}: max connections per IP (${maxConnectionsPerIp}) reached`);
+      socket.close(1013, "too many connections from this address");
+      return;
+    }
+    totalConnections += 1;
+    connectionsByIp.set(ip, connectionsFromThisIp + 1);
+
     const clientId = randomUUID();
     sockets.set(clientId, socket);
+    ipByClient.set(clientId, ip);
     socket.on("message", (data) => {
       messagesSinceLastLog += 1;
-      handleMessage(data.toString(), clientId, sessions, hp, sockets);
+      handleMessage(data.toString(), clientId, sessions, hp, sockets, shipClassPreset, publicMode, maxSessions, generalLimiter, hitReportLimiter);
     });
-    socket.on("close", () => handleDisconnect(clientId, sessions, hp, sockets));
+    socket.on("close", () => {
+      const remaining = (connectionsByIp.get(ip) ?? 1) - 1;
+      if (remaining <= 0) connectionsByIp.delete(ip);
+      else connectionsByIp.set(ip, remaining);
+      ipByClient.delete(clientId);
+      totalConnections -= 1;
+      generalLimiter.reset(clientId);
+      hitReportLimiter.reset(clientId);
+      handleDisconnect(clientId, sessions, hp, sockets);
+    });
     // Required, not optional: ws's maxPayload rejects an oversized frame by emitting
     // an "error" on this socket (e.g. WS_ERR_UNSUPPORTED_MESSAGE_LENGTH) rather than a
     // clean close. An EventEmitter with no "error" listener re-throws as an uncaught
@@ -73,8 +154,20 @@ function handleMessage(
   clientId: string,
   sessions: SessionManager,
   hp: HpTracker,
-  sockets: Map<string, WebSocket>
+  sockets: Map<string, WebSocket>,
+  shipClassPreset: ShipClassPreset,
+  publicMode: boolean,
+  maxSessions: number,
+  generalLimiter: TokenBucket,
+  hitReportLimiter: TokenBucket
 ): void {
+  // A5: applies to EVERY message, valid or not, before any parsing -- a client
+  // flooding with garbage should be capped just as much as one flooding with
+  // well-formed messages. Checked first, ahead of parseMessage.
+  if (!generalLimiter.tryConsume(clientId)) {
+    console.warn(`[server] rate limit exceeded for ${clientId} (general), message dropped`);
+    return;
+  }
   const result = parseMessage(raw);
   if (!result.ok) {
     console.warn(`[server] dropped invalid message from ${clientId}: ${result.error}`);
@@ -82,7 +175,47 @@ function handleMessage(
   }
   const msg = result.message;
   if (msg.type === "session" && msg.action === "join") {
-    joinSession(msg, clientId, sessions, sockets);
+    // A5 "Internet-Modus": in public mode, the LAN default "arena" and any code
+    // shorter than MIN_PUBLIC_SESSION_CODE_LENGTH are rejected, forcing an
+    // operator exposed to the internet to actually configure a real private
+    // code rather than leaving the well-known LAN default reachable by anyone.
+    if (publicMode && !isSessionCodeAllowedInPublicMode(msg.sessionCode)) {
+      console.warn(`[server] rejected join from ${clientId}: sessionCode does not meet public-mode requirements`);
+      return;
+    }
+    // A5: bounds the number of distinct sessions this server will track at
+    // once. Joining a session that already has members never counts as
+    // "creating a new one", so this can never lock existing players out.
+    if (!sessions.hasSession(msg.sessionCode) && sessions.sessionCount() >= maxSessions) {
+      console.warn(`[server] rejected join from ${clientId}: max sessions (${maxSessions}) reached`);
+      return;
+    }
+    joinSession(msg, clientId, sessions, hp, sockets);
+    return;
+  }
+  // A5 review fix: a client-sent "leave" (e.g. the mod detecting the player
+  // exiting the Arena sector, presence-based drop-in) was previously only ever
+  // broadcast to others -- decorative, since sessions.leave() was never actually
+  // called for this path (only a real WebSocket disconnect called it, via
+  // handleDisconnect below). The client would keep being treated as still "in"
+  // that session server-side (sessionCodeOf/ownerOf etc.) despite everyone else
+  // having been told they left. leaveSession() is the same cleanup
+  // handleDisconnect does, just without also removing the (still open) socket.
+  if (msg.type === "session" && msg.action === "leave") {
+    leaveSession(clientId, sessions, hp, sockets);
+    return;
+  }
+  if (msg.type === "chat") {
+    // A5: sanitize BEFORE broadcasting, not just before logging -- the other
+    // session member(s) (and eventually the mod, once chat display lands) get
+    // the sanitized text too, not just this server's own console.
+    const sanitizedMsg: typeof msg = { ...msg, from: sanitizePlayerName(msg.from), text: sanitizeChatText(msg.text) };
+    const sessionCode = sessions.sessionCodeOf(clientId);
+    if (!sessionCode) {
+      console.warn(`[server] chat from ${clientId} outside a session, ignored`);
+      return;
+    }
+    broadcast(sessionCode, clientId, JSON.stringify(sanitizedMsg), sessions, sockets);
     return;
   }
   const sessionCode = sessions.sessionCodeOf(clientId);
@@ -94,15 +227,32 @@ function handleMessage(
   // hit_report is never forwarded raw -- only the hp_state it resolves into is
   // sent on, and to the WHOLE session (including the attacker), not just "others".
   if (msg.type === "hit_report") {
-    if (sessions.ownerOf(msg.sourceId) !== clientId) {
-      console.warn(`[server] dropped hit_report from ${clientId}: sourceId "${msg.sourceId}" is not owned by this client`);
+    // A5: a SEPARATE, tighter rate limit than the general one -- combat-critical
+    // and worth its own guard against a client that stays within the general
+    // limit but still floods hit_reports specifically.
+    if (!hitReportLimiter.tryConsume(clientId)) {
+      console.warn(`[server] hit_report rate limit exceeded for ${clientId}, message dropped`);
       return;
     }
-    handleHitReport(msg, sessionCode, sessions, hp, sockets);
+    if (!requireOwnership(sessions, clientId, msg.sourceId, "hit_report", "sourceId")) return;
+    handleHitReport(msg, sessionCode, clientId, sessions, hp, sockets);
     return;
   }
 
   if (msg.type === "spawn") {
+    // A5: the server had never validated shipType at all before this -- the macro
+    // whitelist only ever ran agent-side (decideRelay, for INCOMING spawns from
+    // the relay), which a client connecting directly to the WebSocket instead of
+    // through the agent would simply bypass. Checked here too now, plus the new
+    // ship-class rule preset on top of it.
+    if (!isKnownShipMacro(msg.shipType)) {
+      console.warn(`[server] dropped spawn from ${clientId}: unknown shipType "${msg.shipType}"`);
+      return;
+    }
+    if (!isShipClassAllowed(msg.shipType, shipClassPreset)) {
+      console.warn(`[server] dropped spawn from ${clientId}: shipType "${msg.shipType}" not allowed under ship class preset "${shipClassPreset}"`);
+      return;
+    }
     if (sessions.hasOtherActiveSpawn(clientId, msg.objectId)) {
       console.warn(`[server] dropped spawn from ${clientId}: spawn cap exceeded (already has a different active spawn)`);
       return;
@@ -110,6 +260,23 @@ function handleMessage(
     const existingOwner = sessions.ownerOf(msg.objectId);
     if (existingOwner !== undefined && existingOwner !== clientId) {
       console.warn(`[server] dropped spawn from ${clientId}: objectId "${msg.objectId}" is already owned by another client`);
+      return;
+    }
+    // A5 "Respawn-Gate": before this check, a client owning an objectId could
+    // re-send `spawn` for it at ANY time, including while it was still alive --
+    // hp.register() unconditionally resets hull/shield to max, so this was a
+    // free, instant, unlimited self-heal (send `spawn` again whenever damaged).
+    // `existingOwner === clientId` can only be true while the CURRENT spawn
+    // record still exists, i.e. it hasn't been destroyed/despawned yet (both
+    // destroyObject() and a real despawn call removeSpawn(), which clears
+    // ownerByObjectId) -- so this rejects exactly the "still alive" case, while
+    // a genuine respawn AFTER proper destruction (existingOwner undefined by
+    // then) remains unaffected. Interacts correctly with the A5 Block 1 session-
+    // switch fix: switching sessions already frees the objectId (removeSpawn +
+    // hp.remove for the OLD session), so respawning under a NEW session's HP
+    // tracker is a fresh registration, not a heal of the old one.
+    if (existingOwner === clientId) {
+      console.warn(`[server] dropped spawn from ${clientId}: objectId "${msg.objectId}" is still active, must be destroyed/despawned before respawning`);
       return;
     }
     sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw);
@@ -127,8 +294,13 @@ function handleMessage(
   }
 
   if (msg.type === "state_update") {
-    if (sessions.ownerOf(msg.shipId) !== clientId) {
-      console.warn(`[server] dropped state_update from ${clientId}: shipId "${msg.shipId}" is not owned by this client (or has no known spawn)`);
+    if (!requireOwnership(sessions, clientId, msg.shipId, "state_update", "shipId")) return;
+    // A5: previously only the agent checked this (decideRelay, for INCOMING
+    // state_updates about OTHER players), which a client connecting directly to
+    // the WebSocket instead of through the agent would simply bypass, same gap
+    // as the shipType whitelist above.
+    if (!isWithinArenaBounds(msg.position) || !isPlausibleVelocity(msg.velocity)) {
+      console.warn(`[server] dropped state_update from ${clientId}: position/velocity outside plausible Arena bounds`);
       return;
     }
     broadcast(sessionCode, clientId, raw, sessions, sockets);
@@ -139,10 +311,7 @@ function handleMessage(
     // Not part of normal operation (despawns are server-generated, see
     // broadcastDespawns/destroyObject) -- defense in depth in case a client ever
     // sends one anyway.
-    if (sessions.ownerOf(msg.objectId) !== clientId) {
-      console.warn(`[server] dropped despawn from ${clientId}: objectId "${msg.objectId}" is not owned by this client`);
-      return;
-    }
+    if (!requireOwnership(sessions, clientId, msg.objectId, "despawn", "objectId")) return;
     sessions.removeSpawn(sessionCode, msg.objectId);
     hp.remove(sessionCode, msg.objectId);
     broadcast(sessionCode, clientId, raw, sessions, sockets);
@@ -150,10 +319,7 @@ function handleMessage(
   }
 
   if (msg.type === "fire_event") {
-    if (sessions.ownerOf(msg.sourceId) !== clientId) {
-      console.warn(`[server] dropped fire_event from ${clientId}: sourceId "${msg.sourceId}" is not owned by this client`);
-      return;
-    }
+    if (!requireOwnership(sessions, clientId, msg.sourceId, "fire_event", "sourceId")) return;
     broadcast(sessionCode, clientId, raw, sessions, sockets);
     return;
   }
@@ -171,6 +337,23 @@ function handleMessage(
 }
 
 /**
+ * Consolidates the four identical "does clientId actually own this objectId"
+ * checks handleMessage needed (hit_report.sourceId, state_update.shipId,
+ * despawn.objectId, fire_event.sourceId) -- A5 review requirement, pure
+ * refactoring, no behavior change. `ownerOf` returning undefined (no spawn at
+ * all, or a fresh session-switch ghost) is rejected the same as a spoofed
+ * objectId belonging to someone else; see handleMessage's own doc comment for
+ * why that's deliberate. `messageType`/`field` are only used for the log line.
+ */
+function requireOwnership(sessions: SessionManager, clientId: string, objectId: string, messageType: string, field: string): boolean {
+  if (sessions.ownerOf(objectId) !== clientId) {
+    console.warn(`[server] dropped ${messageType} from ${clientId}: ${field} "${objectId}" is not owned by this client (or has no known spawn)`);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Resolves a hit_report into an authoritative hp_state (A4 "Server ist
  * HP-Autorität"): validates the claimed damage is a plausible positive number,
  * then clamps it (untrusted client input, A2 trust boundary rationale) before
@@ -183,6 +366,7 @@ function handleMessage(
 function handleHitReport(
   msg: HitReportMessage,
   sessionCode: string,
+  attackerClientId: string,
   sessions: SessionManager,
   hp: HpTracker,
   sockets: Map<string, WebSocket>
@@ -203,22 +387,55 @@ function handleHitReport(
   const hpStateMsg = JSON.stringify({ v: 1, type: "hp_state", seq: 0, ts: Date.now(), objectId: msg.targetId, hull: state.hull, shield: state.shield });
   broadcastToSession(sessionCode, hpStateMsg, sessions, sockets);
   if (isDestroyed(state)) {
-    destroyObject(msg.targetId, sessionCode, sessions, hp, sockets);
+    destroyObject(msg.targetId, sessionCode, attackerClientId, sessions, hp, sockets);
   }
 }
 
+/**
+ * Destruction cleanup plus, since A5, the "kill-feed": the server is the one
+ * place that actually knows a kill happened (it's the HP authority), so it
+ * builds the announcement itself rather than trusting either client to report
+ * their own kill. Sent as an ordinary `chat` message (`from: "server"`) so no
+ * new message type/mod-side extraction is needed -- MD just needs to recognize
+ * `chat` and show it as an on-screen notification (assumption, see
+ * docs/A5-messprotokoll.md).
+ */
 function destroyObject(
   objectId: string,
   sessionCode: string,
+  attackerClientId: string,
   sessions: SessionManager,
   hp: HpTracker,
   sockets: Map<string, WebSocket>
 ): void {
+  // Captured BEFORE removeSpawn() below wipes ownerByObjectId's entry for objectId.
+  const victimClientId = sessions.ownerOf(objectId);
   hp.remove(sessionCode, objectId);
   sessions.removeSpawn(sessionCode, objectId);
   console.log(`[server] ${objectId} destroyed (hull reached 0) in session ${sessionCode}`);
   const despawnMsg = JSON.stringify({ v: 1, type: "despawn", seq: 0, ts: Date.now(), objectId, reason: "destroyed" });
   broadcastToSession(sessionCode, despawnMsg, sessions, sockets);
+  broadcastKillFeed(sessionCode, attackerClientId, victimClientId, sessions, sockets);
+}
+
+function broadcastKillFeed(
+  sessionCode: string,
+  attackerClientId: string,
+  victimClientId: string | undefined,
+  sessions: SessionManager,
+  sockets: Map<string, WebSocket>
+): void {
+  const attackerName = sessions.memberOf(sessionCode, attackerClientId)?.playerName ?? "unknown";
+  const victimName = (victimClientId && sessions.memberOf(sessionCode, victimClientId)?.playerName) || "unknown";
+  const killFeedMsg = JSON.stringify({
+    v: 1,
+    type: "chat",
+    seq: 0,
+    ts: Date.now(),
+    from: "server",
+    text: `${attackerName} destroyed ${victimName}`,
+  });
+  broadcastToSession(sessionCode, killFeedMsg, sessions, sockets);
 }
 
 /** Sends raw to every member of a session, nobody excluded (unlike broadcast(), which excludes the sender). */
@@ -229,17 +446,43 @@ function broadcastToSession(sessionCode: string, raw: string, sessions: SessionM
   }
 }
 
+/**
+ * A5 review fix: joining a session while already in a DIFFERENT one (a real,
+ * everyday occurrence once presence-based drop-in triggers session switches on
+ * sector change, not just once at connect time) must clean up the OLD session's
+ * spawns/HP exactly like a disconnect would -- otherwise the old session's other
+ * members keep a ghost proxy forever, and a later joiner of the OLD session would
+ * get it replayed even though its "owner" is long gone. SessionManager.join()
+ * returns the old session (if any) precisely so this cleanup can run here, since
+ * SessionManager itself has no access to `hp`/`sockets` to broadcast with.
+ */
 function joinSession(
   msg: SessionMessage,
   clientId: string,
   sessions: SessionManager,
+  hp: HpTracker,
   sockets: Map<string, WebSocket>
 ): void {
-  const member: SessionMember = { id: clientId, playerName: msg.playerName ?? "unknown" };
-  sessions.join(msg.sessionCode, member);
+  // A5: sanitized ONCE here, so both what's stored (SessionMember.playerName,
+  // reused by the kill-feed etc.) and what's broadcast to other members are the
+  // safe version, not just this server's own log lines.
+  const playerName = msg.playerName !== undefined ? sanitizePlayerName(msg.playerName) : undefined;
+  const member: SessionMember = { id: clientId, playerName: playerName ?? "unknown" };
+  const previous = sessions.join(msg.sessionCode, member);
+  if (previous && previous.sessionCode !== msg.sessionCode) {
+    console.log(`[server] ${member.playerName} (${clientId}) switched from session ${previous.sessionCode} to ${msg.sessionCode}`);
+    broadcastLeave(previous.sessionCode, clientId, previous.member, sessions, sockets);
+    broadcastDespawns(previous.sessionCode, clientId, sessions, hp, sockets);
+  }
   console.log(`[server] ${member.playerName} (${clientId}) joined session ${msg.sessionCode}`);
-  broadcast(msg.sessionCode, clientId, JSON.stringify(msg), sessions, sockets);
+  const sanitizedMsg: SessionMessage = { ...msg, playerName: member.playerName };
+  broadcast(msg.sessionCode, clientId, JSON.stringify(sanitizedMsg), sessions, sockets);
   replaySpawns(msg.sessionCode, clientId, sessions, sockets);
+}
+
+/** A5 "Internet-Modus" entropy floor: not real entropy measurement, just cheap-to-enforce minimums (reject the well-known LAN default and anything implausibly short). */
+function isSessionCodeAllowedInPublicMode(sessionCode: string): boolean {
+  return sessionCode !== "arena" && sessionCode.length >= MIN_PUBLIC_SESSION_CODE_LENGTH;
 }
 
 /** Sends previously spawned proxies (from other members) to a newly joined member, so it doesn't start blind. */
@@ -271,6 +514,11 @@ function broadcast(
 
 function handleDisconnect(clientId: string, sessions: SessionManager, hp: HpTracker, sockets: Map<string, WebSocket>): void {
   sockets.delete(clientId);
+  leaveSession(clientId, sessions, hp, sockets);
+}
+
+/** Removes clientId from whatever session it's in (if any) and cleans up its spawns/HP -- shared by a real WS disconnect and an explicit client-sent "leave" (A5). */
+function leaveSession(clientId: string, sessions: SessionManager, hp: HpTracker, sockets: Map<string, WebSocket>): void {
   const left = sessions.leave(clientId);
   if (!left) return;
   console.log(`[server] ${left.member.playerName} (${clientId}) left session ${left.sessionCode}`);

@@ -35,16 +35,22 @@ Jeder Client bleibt lokal autoritativ für sein eigenes Universum ("Multiplayer 
 der Simulation, nicht darin" - `docs/PlanMod.md`). Der Relay-Server gruppiert
 Clients pro Session und broadcastet Nachrichten an die jeweils anderen
 Sitzungsmitglieder; er ist ab Milestone A4 zusätzlich HP-Autorität für den Kampf.
+Seit A5 ist das Beitreten selbst "Drop-in": wer den Arena-Sektor betritt, ist
+automatisch in der Session, ganz ohne Lobby/Ready-Check/Session-Code-Dialog.
 
 ## Repo-Struktur
 
 ```
-/mod/       X4-Extension (content.xml, md/, aiscripts/) - Telemetrie, Proxy-Spawning/Despawn,
-            Dead Reckoning, seit A4 Kampf (lokale Unverwundbarkeit, Treffer-Erkennung, hp_state)
-/agent/     Node.js-Agent (Named-Pipe-Server, WebSocket-Client, Simulator für Tests ohne X4)
-/server/    Node.js-Relay-Server (Sessions, seit A4 HP-Autorität für den Kampf)
+/mod/       X4-Extension (content.xml, md/, aiscripts/) - Telemetrie, seit A5 Drop-in-Präsenz-
+            Erkennung (Sektor-Ein-/Austritt = Session Join/Leave + Spawn/Despawn mit echtem
+            Schiff), Dead Reckoning, seit A4 Kampf (lokale Unverwundbarkeit, Treffer-Erkennung,
+            hp_state), seit A5 SETA-Erkennung (Proxy-Einfrieren) und drei Kartenvarianten
+/agent/     Node.js-Agent (Named-Pipe-Server, WebSocket-Client, Simulator für Tests ohne X4),
+            seit A5 dynamische Session (kein fixer Join beim Connect) mit Reconnect-Wiederherstellung
+/server/    Node.js-Relay-Server (Sessions, seit A4 HP-Autorität für den Kampf, seit A5 zusätzlich
+            Kill-Feed und konfigurierbares Schiffsklassen-Regel-Preset)
 /protocol/  Geteiltes Nachrichtenprotokoll v1 (TS-Typen + JSON-Schema + Validierung)
-/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1- bis A4-messprotokoll.md)
+/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1- bis A5-messprotokoll.md)
 ```
 
 ## Setup

@@ -9,7 +9,10 @@ import { NdjsonSplitter } from "./ndjson.js";
  * Connects to the agent's Named Pipe as a client (the role SirNukes' Named_Pipes
  * API plays in-game), announces itself with a `spawn` message, then streams
  * plausible telemetry (circular flight) at 10 Hz -- mirroring what the real mod
- * (XMP_Arena_AnnounceSpawn + XMP_Telemetry_Tick) does.
+ * (XMP_Arena_OnEnterSector, A5, + XMP_Telemetry_Tick) does once the player
+ * enters the Arena sector. This simulator always spawns immediately on connect
+ * (it has no "sector" to detect), so run it with an explicit --session (or
+ * XMP_SESSION on its agent) the same way A1-A4 always did.
  *
  * Two-way since A2: also reads whatever the agent forwards back down the same pipe
  * connection (other session members' spawn/despawn/state_update, relayed from the

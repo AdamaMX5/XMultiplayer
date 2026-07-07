@@ -86,6 +86,13 @@
     brief, visible mispredict, corrected either by the next real update or (if bad
     enough) by the snap threshold above. Not solvable without a proper motion model;
     accepted per PlanMod.md 0.4/1.3 expectation management.
+
+    A5 addition: this.blackboard.$XMP_Frozen (set by XMP_Arena_HandleSetaStatus in
+    XMP_Arena.xml) takes priority over everything above; while the proxy's owner
+    is known to be in SETA on their own end, extrapolation is skipped entirely and
+    the proxy just holds position, since our elapsed-time-based math assumes 1:1
+    real-time/game-time, which SETA specifically breaks for the accelerated side.
+    See that cue's own header for the reverse owner-name lookup this depends on.
   -->
   <params>
     <param name="$ExtrapolationHorizonSec" default="1.5" />
@@ -105,72 +112,103 @@
 
   <do_while value="true">
     <do_all>
-      <do_if value="this.blackboard.$XMP_TargetRecvTime != null and this.blackboard.$XMP_TargetRecvTime != $LastSeenRecvTime">
+      <!--
+        A5 "SETA/Pause-Erkennung": XMP_Arena_HandleSetaStatus (XMP_Arena.xml)
+        sets this.blackboard.$XMP_Frozen when the OWNER of this proxy is known
+        to be in SETA (time acceleration) on their own end. Frozen takes
+        priority over everything else below: our extrapolation math assumes
+        "elapsed real time" maps to "elapsed game time" at a 1:1 rate, which is
+        exactly what SETA breaks for the accelerated player (more of THEIR game
+        time passes per real second than ours), so extrapolating through it
+        would just fly off in the wrong direction/distance rather than merely
+        being a little stale. Holding position (like the update-timeout case
+        below) is the safe, honest behavior instead of confidently guessing
+        wrong. $IsStopped is shared with the update-timeout branch below on
+        purpose: whichever reason we're currently stopped for, a single
+        move.stop should only ever be issued once per stopped period, not
+        re-issued every loop iteration.
+      -->
+      <do_if value="this.blackboard.$XMP_Frozen == true">
         <do_all>
-          <set_value name="$DeltaX" exact="this.position.x - this.blackboard.$XMP_TargetPosX" />
-          <set_value name="$DeltaY" exact="this.position.y - this.blackboard.$XMP_TargetPosY" />
-          <set_value name="$DeltaZ" exact="this.position.z - this.blackboard.$XMP_TargetPosZ" />
-          <set_value name="$DeviationSq" exact="$DeltaX * $DeltaX + $DeltaY * $DeltaY + $DeltaZ * $DeltaZ" />
-          <do_if value="$DeviationSq &gt; $SnapThresholdMeters * $SnapThresholdMeters">
+          <do_if value="not $IsStopped">
             <do_all>
-              <set_object_position
-                object="this"
-                position="table[x=this.blackboard.$XMP_TargetPosX, y=this.blackboard.$XMP_TargetPosY, z=this.blackboard.$XMP_TargetPosZ]" />
-              <debug_text text="'[XMultiplayer][ProxyPilot] snap teleport, deviation_sq=' + $DeviationSq" filter="general" />
+              <move.stop />
+              <set_value name="$IsStopped" exact="true" />
+              <debug_text text="'[XMultiplayer][ProxyPilot] frozen (owner in SETA), holding position'" filter="general" />
             </do_all>
           </do_if>
-          <set_value name="$LastSeenRecvTime" exact="this.blackboard.$XMP_TargetRecvTime" />
-          <set_value name="$IsStopped" exact="false" />
         </do_all>
-      </do_if>
-
-      <do_if value="this.blackboard.$XMP_TargetRecvTime != null">
-        <do_all>
-          <set_value name="$SinceLastUpdate" exact="player.age - this.blackboard.$XMP_TargetRecvTime" />
-          <!--
-            do_if/else structure note: the true-branch below is a single <do_all>
-            (containing a nested do_if with NO else of its own), so that <else>'s
-            immediately preceding sibling is always a <do_all>, never a closed
-            <do_if> element, matching the pattern used everywhere else in this
-            codebase. An earlier version nested the "not $IsStopped" do_if directly
-            as the outer do_if's true-branch with <else> as its next sibling; that
-            reads as "else pairs with the outer do_if" by XML nesting, but X4's
-            actual do_if/else pairing (per the A3 review) attaches <else> to
-            whichever do_if is its nearest PRECEDING SIBLING in document order,
-            here that was the inner "not $IsStopped" do_if, not the outer one.
-            Effect of that bug: once stopped, every later iteration re-entered the
-            (wrongly paired) "else" and flew off stale data again, while still
-            logging "holding position" from the one-time transition; the log
-            would have lied about what the ship was actually doing.
-          -->
-          <do_if value="$SinceLastUpdate &gt; $UpdateTimeoutSec">
-            <do_all>
-              <do_if value="not $IsStopped">
-                <do_all>
-                  <move.stop />
-                  <set_value name="$IsStopped" exact="true" />
-                  <debug_text text="'[XMultiplayer][ProxyPilot] no update for ' + $SinceLastUpdate + 's, holding position'" filter="general" />
-                </do_all>
-              </do_if>
-            </do_all>
-            <else>
+        <else>
+          <do_all>
+            <do_if value="this.blackboard.$XMP_TargetRecvTime != null and this.blackboard.$XMP_TargetRecvTime != $LastSeenRecvTime">
               <do_all>
-                <!-- A fresh update arrived after a timeout (or none happened yet):
-                     make sure we're not left thinking we're still stopped. -->
+                <set_value name="$DeltaX" exact="this.position.x - this.blackboard.$XMP_TargetPosX" />
+                <set_value name="$DeltaY" exact="this.position.y - this.blackboard.$XMP_TargetPosY" />
+                <set_value name="$DeltaZ" exact="this.position.z - this.blackboard.$XMP_TargetPosZ" />
+                <set_value name="$DeviationSq" exact="$DeltaX * $DeltaX + $DeltaY * $DeltaY + $DeltaZ * $DeltaZ" />
+                <do_if value="$DeviationSq &gt; $SnapThresholdMeters * $SnapThresholdMeters">
+                  <do_all>
+                    <set_object_position
+                      object="this"
+                      position="table[x=this.blackboard.$XMP_TargetPosX, y=this.blackboard.$XMP_TargetPosY, z=this.blackboard.$XMP_TargetPosZ]" />
+                    <debug_text text="'[XMultiplayer][ProxyPilot] snap teleport, deviation_sq=' + $DeviationSq" filter="general" />
+                  </do_all>
+                </do_if>
+                <set_value name="$LastSeenRecvTime" exact="this.blackboard.$XMP_TargetRecvTime" />
                 <set_value name="$IsStopped" exact="false" />
-                <set_value name="$Elapsed" exact="min{value1=$SinceLastUpdate, value2=$ExtrapolationHorizonSec}" />
-                <set_value name="$ExtrapolatedX" exact="this.blackboard.$XMP_TargetPosX + this.blackboard.$XMP_TargetVelX * $Elapsed" />
-                <set_value name="$ExtrapolatedY" exact="this.blackboard.$XMP_TargetPosY + this.blackboard.$XMP_TargetVelY * $Elapsed" />
-                <set_value name="$ExtrapolatedZ" exact="this.blackboard.$XMP_TargetPosZ + this.blackboard.$XMP_TargetVelZ * $Elapsed" />
-                <!-- No collision-avoidance-disabling attribute passed here on
-                     purpose: PlanMod.md A3 requires the AI-script's own obstacle
-                     avoidance to stay active, so this simply relies on the
-                     action's default behavior. -->
-                <move.to.position position="table[x=$ExtrapolatedX, y=$ExtrapolatedY, z=$ExtrapolatedZ]" />
               </do_all>
-            </else>
-          </do_if>
-        </do_all>
+            </do_if>
+
+            <do_if value="this.blackboard.$XMP_TargetRecvTime != null">
+              <do_all>
+                <set_value name="$SinceLastUpdate" exact="player.age - this.blackboard.$XMP_TargetRecvTime" />
+                <!--
+                  do_if/else structure note: the true-branch below is a single <do_all>
+                  (containing a nested do_if with NO else of its own), so that <else>'s
+                  immediately preceding sibling is always a <do_all>, never a closed
+                  <do_if> element, matching the pattern used everywhere else in this
+                  codebase. An earlier version nested the "not $IsStopped" do_if directly
+                  as the outer do_if's true-branch with <else> as its next sibling; that
+                  reads as "else pairs with the outer do_if" by XML nesting, but X4's
+                  actual do_if/else pairing (per the A3 review) attaches <else> to
+                  whichever do_if is its nearest PRECEDING SIBLING in document order,
+                  here that was the inner "not $IsStopped" do_if, not the outer one.
+                  Effect of that bug: once stopped, every later iteration re-entered the
+                  (wrongly paired) "else" and flew off stale data again, while still
+                  logging "holding position" from the one-time transition; the log
+                  would have lied about what the ship was actually doing.
+                -->
+                <do_if value="$SinceLastUpdate &gt; $UpdateTimeoutSec">
+                  <do_all>
+                    <do_if value="not $IsStopped">
+                      <do_all>
+                        <move.stop />
+                        <set_value name="$IsStopped" exact="true" />
+                        <debug_text text="'[XMultiplayer][ProxyPilot] no update for ' + $SinceLastUpdate + 's, holding position'" filter="general" />
+                      </do_all>
+                    </do_if>
+                  </do_all>
+                  <else>
+                    <do_all>
+                      <!-- A fresh update arrived after a timeout (or none happened yet):
+                           make sure we're not left thinking we're still stopped. -->
+                      <set_value name="$IsStopped" exact="false" />
+                      <set_value name="$Elapsed" exact="min{value1=$SinceLastUpdate, value2=$ExtrapolationHorizonSec}" />
+                      <set_value name="$ExtrapolatedX" exact="this.blackboard.$XMP_TargetPosX + this.blackboard.$XMP_TargetVelX * $Elapsed" />
+                      <set_value name="$ExtrapolatedY" exact="this.blackboard.$XMP_TargetPosY + this.blackboard.$XMP_TargetVelY * $Elapsed" />
+                      <set_value name="$ExtrapolatedZ" exact="this.blackboard.$XMP_TargetPosZ + this.blackboard.$XMP_TargetVelZ * $Elapsed" />
+                      <!-- No collision-avoidance-disabling attribute passed here on
+                           purpose: PlanMod.md A3 requires the AI-script's own obstacle
+                           avoidance to stay active, so this simply relies on the
+                           action's default behavior. -->
+                      <move.to.position position="table[x=$ExtrapolatedX, y=$ExtrapolatedY, z=$ExtrapolatedZ]" />
+                    </do_all>
+                  </else>
+                </do_if>
+              </do_all>
+            </do_if>
+          </do_all>
+        </else>
       </do_if>
     </do_all>
     <wait exact="$RetargetIntervalSec seconds" />

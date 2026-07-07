@@ -6,7 +6,8 @@ test("uses hard-coded defaults when no CLI args or env vars are given", () => {
   const config = parseConfig([], {});
   assert.deepEqual(config, {
     serverUrl: "ws://localhost:8765",
-    sessionCode: "default",
+    sessionCode: "arena",
+    sessionCodeExplicit: false,
     pipeName: "xmultiplayer",
     playerName: "pilot",
   });
@@ -42,9 +43,25 @@ test("supports all four flags together", () => {
   assert.deepEqual(config, {
     serverUrl: "ws://a",
     sessionCode: "s1",
+    sessionCodeExplicit: true,
     pipeName: "p1",
     playerName: "Alice",
   });
+});
+
+// --- A5: sessionCodeExplicit, which decides whether the agent auto-joins at
+// connect time or waits for the mod's own session-join (presence-based drop-in).
+
+test("sessionCodeExplicit is false when sessionCode is only the hard-coded default", () => {
+  assert.equal(parseConfig([], {}).sessionCodeExplicit, false);
+});
+
+test("sessionCodeExplicit is true when --session is given on the CLI", () => {
+  assert.equal(parseConfig(["--session", "arena-1"], {}).sessionCodeExplicit, true);
+});
+
+test("sessionCodeExplicit is true when XMP_SESSION is given via the environment", () => {
+  assert.equal(parseConfig([], { XMP_SESSION: "arena-1" }).sessionCodeExplicit, true);
 });
 
 test("ignores a flag with no following value", () => {

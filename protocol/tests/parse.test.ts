@@ -150,6 +150,13 @@ test("rejects session with an invalid action", () => {
   assert.equal(result.ok, false);
 });
 
+test("accepts session seta_on and seta_off (A5)", () => {
+  const on = parseMessage(JSON.stringify({ ...base, type: "session", action: "seta_on", sessionCode: "arena-1", playerName: "Alice" }));
+  assert.equal(on.ok, true);
+  const off = parseMessage(JSON.stringify({ ...base, type: "session", action: "seta_off", sessionCode: "arena-1", playerName: "Alice" }));
+  assert.equal(off.ok, true);
+});
+
 test("accepts a valid chat message", () => {
   const msg = { ...base, type: "chat", from: "Alice", text: "gg" };
   const result = parseMessage(JSON.stringify(msg));

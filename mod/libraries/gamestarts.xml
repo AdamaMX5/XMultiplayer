@@ -24,4 +24,53 @@
       </ship>
     </loadout>
   </gamestart>
+
+  <!--
+    A5 map variants (PlanMod.md 1.1): one gamestart per variant sector
+    (sectors.xml/clusters.xml), otherwise identical to XMP_Arena_Start above.
+    Selecting a map variant is just picking a different gamestart at the "New
+    Game" screen; no in-game switcher/menu, matching how the base Arena
+    itself already works (A2).
+  -->
+  <gamestart name="XMP_Arena_Start_Asteroid" locationclass="sector" location="XMP_Arena_Sector_Asteroid_macro" showstartmenu="1">
+    <name>{20206,9022}</name>
+    <description>{20206,9023}</description>
+    <briefing>{20206,9007}</briefing>
+    <mode gameoption="normal" />
+    <faction ref="player" />
+    <player name="{20206,9008}" money="0" />
+    <loadout>
+      <ship macro="ship_arg_s_fighter_01_a_macro" name="{20206,9009}">
+        <position x="0" y="0" z="0" />
+      </ship>
+    </loadout>
+  </gamestart>
+
+  <gamestart name="XMP_Arena_Start_Debris" locationclass="sector" location="XMP_Arena_Sector_Debris_macro" showstartmenu="1">
+    <name>{20206,9024}</name>
+    <description>{20206,9025}</description>
+    <briefing>{20206,9007}</briefing>
+    <mode gameoption="normal" />
+    <faction ref="player" />
+    <player name="{20206,9008}" money="0" />
+    <loadout>
+      <ship macro="ship_arg_s_fighter_01_a_macro" name="{20206,9009}">
+        <position x="0" y="0" z="0" />
+      </ship>
+    </loadout>
+  </gamestart>
+
+  <gamestart name="XMP_Arena_Start_Nebula" locationclass="sector" location="XMP_Arena_Sector_Nebula_macro" showstartmenu="1">
+    <name>{20206,9026}</name>
+    <description>{20206,9027}</description>
+    <briefing>{20206,9007}</briefing>
+    <mode gameoption="normal" />
+    <faction ref="player" />
+    <player name="{20206,9008}" money="0" />
+    <loadout>
+      <ship macro="ship_arg_s_fighter_01_a_macro" name="{20206,9009}">
+        <position x="0" y="0" z="0" />
+      </ship>
+    </loadout>
+  </gamestart>
 </gamestarts>
