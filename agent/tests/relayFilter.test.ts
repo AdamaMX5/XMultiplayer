@@ -101,3 +101,29 @@ test("forwards an hp_state even when its objectId is not in knownObjectIds (own 
   const decision = decideRelay({ ...base, type: "hp_state", objectId: "own-ship-never-in-known-spawns", hull: 0, shield: 0 }, noneKnown);
   assert.equal(decision.forward, true);
 });
+
+// --- C1: sector_object/sector_mirror have no bounds/ownership/orphan filter --
+// static sector scenery is not tied to a "known spawn" the way a ship is.
+
+test("forwards a sector_object regardless of knownObjectIds content", () => {
+  const decision = decideRelay(
+    {
+      ...base,
+      type: "sector_object",
+      objectId: "station-1",
+      objectType: "station",
+      macroName: "station_arg_shipyard_01_macro",
+      position: { x: 999_999, y: 0, z: 0 },
+      rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+    },
+    noneKnown
+  );
+  assert.equal(decision.forward, true);
+});
+
+test("forwards sector_mirror begin/end unconditionally", () => {
+  const begin = decideRelay({ ...base, type: "sector_mirror", action: "begin", objectCount: 10 }, noneKnown);
+  assert.equal(begin.forward, true);
+  const end = decideRelay({ ...base, type: "sector_mirror", action: "end" }, noneKnown);
+  assert.equal(end.forward, true);
+});

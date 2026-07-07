@@ -7,6 +7,7 @@ import {
   isPlausibleVelocity,
   isWithinArenaBounds,
   MAX_MESSAGE_BYTES,
+  MAX_SECTOR_OBJECTS_PER_MIRROR,
   parseMessage,
   sanitizeChatText,
   sanitizePlayerName,
@@ -81,6 +82,16 @@ export function startRelayServer(options: RelayServerOptions): WebSocketServer {
   let totalConnections = 0;
   const connectionsByIp = new Map<string, number>();
   const ipByClient = new Map<string, string>();
+  // C1 security review finding: sector_mirror.objectCount is purely self-reported
+  // by the sender (protocol/src/parse.ts only range-checks it, 0..
+  // MAX_SECTOR_OBJECTS_PER_MIRROR), so a client could claim `begin objectCount:1`
+  // and then send an unbounded number of real sector_object messages -- the
+  // claimed count on its own enforces nothing. This tracks how many
+  // sector_object messages each client has ACTUALLY sent since its last
+  // sector_mirror "begin" (see handleMessage's sector_object handling below),
+  // independent of what it claimed, so MAX_SECTOR_OBJECTS_PER_MIRROR is a real
+  // cap rather than a cosmetic one.
+  const sectorMirrorCounts = new Map<string, number>();
   let messagesSinceLastLog = 0;
 
   wss.on("connection", (socket, req) => {
@@ -104,7 +115,19 @@ export function startRelayServer(options: RelayServerOptions): WebSocketServer {
     ipByClient.set(clientId, ip);
     socket.on("message", (data) => {
       messagesSinceLastLog += 1;
-      handleMessage(data.toString(), clientId, sessions, hp, sockets, shipClassPreset, publicMode, maxSessions, generalLimiter, hitReportLimiter);
+      handleMessage(
+        data.toString(),
+        clientId,
+        sessions,
+        hp,
+        sockets,
+        shipClassPreset,
+        publicMode,
+        maxSessions,
+        generalLimiter,
+        hitReportLimiter,
+        sectorMirrorCounts
+      );
     });
     socket.on("close", () => {
       const remaining = (connectionsByIp.get(ip) ?? 1) - 1;
@@ -114,6 +137,7 @@ export function startRelayServer(options: RelayServerOptions): WebSocketServer {
       totalConnections -= 1;
       generalLimiter.reset(clientId);
       hitReportLimiter.reset(clientId);
+      sectorMirrorCounts.delete(clientId);
       handleDisconnect(clientId, sessions, hp, sockets);
     });
     // Required, not optional: ws's maxPayload rejects an oversized frame by emitting
@@ -159,7 +183,8 @@ function handleMessage(
   publicMode: boolean,
   maxSessions: number,
   generalLimiter: TokenBucket,
-  hitReportLimiter: TokenBucket
+  hitReportLimiter: TokenBucket,
+  sectorMirrorCounts: Map<string, number>
 ): void {
   // A5: applies to EVERY message, valid or not, before any parsing -- a client
   // flooding with garbage should be capped just as much as one flooding with
@@ -333,6 +358,37 @@ function handleMessage(
     return;
   }
 
+  // C1 "Statischer Sektor-Mirror": sector_object/sector_mirror need no
+  // requireOwnership() check, unlike spawn/state_update/despawn/fire_event
+  // above -- static sector scenery has no per-object OWNER the way a player's
+  // ship does. They DO still need the sectorMirrorCounts bookkeeping below
+  // (security review finding: sector_mirror.objectCount is purely
+  // self-reported, protocol/src/parse.ts only range-checks it against
+  // MAX_SECTOR_OBJECTS_PER_MIRROR -- without an independent server-side tally
+  // a client could claim `begin objectCount:1` and then send an unbounded
+  // number of real sector_object messages, since nothing would ever compare
+  // the claim against reality).
+  if (msg.type === "sector_mirror" && msg.action === "begin") {
+    sectorMirrorCounts.set(clientId, 0);
+    broadcast(sessionCode, clientId, raw, sessions, sockets);
+    return;
+  }
+  if (msg.type === "sector_object") {
+    const count = (sectorMirrorCounts.get(clientId) ?? 0) + 1;
+    if (count > MAX_SECTOR_OBJECTS_PER_MIRROR) {
+      console.warn(`[server] dropped sector_object from ${clientId}: exceeds MAX_SECTOR_OBJECTS_PER_MIRROR (${MAX_SECTOR_OBJECTS_PER_MIRROR}) for the current mirror, regardless of its claimed objectCount`);
+      return;
+    }
+    sectorMirrorCounts.set(clientId, count);
+    broadcast(sessionCode, clientId, raw, sessions, sockets);
+    return;
+  }
+
+  // Structural validation for every other still-unhandled type (currently
+  // just sector_mirror's "end" action) already happened once, uniformly, in
+  // parseMessage (protocol/src/parse.ts) -- the same boundary every other
+  // message type's fields are checked at. Plain pass-through broadcast is all
+  // that is left to do.
   broadcast(sessionCode, clientId, raw, sessions, sockets);
 }
 

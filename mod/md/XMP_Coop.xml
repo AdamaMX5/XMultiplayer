@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="XMP_Coop" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../libraries/md.xsd">
+  <!--
+    XMultiplayer Coop: static sector mirror (Milestone C1, PlanMod.md Phase 2
+    "Coop im Universum des Hosts"). Everything in this file is PLAUSIBLE, not
+    VERIFIED, same status as XMP_Telemetry.xml/XMP_Arena.xml (A1-A5) - no X4
+    installation is available in this development environment. See
+    docs/C1-messprotokoll.md for the full assumption list.
+
+    SCOPE OF C1: when ANY session member's `session` `join` is received (by
+    every OTHER member, via the existing dispatch this file plugs into -
+    XMP_Arena.xml's XMP_Arena_Dispatch), each recipient walks ITS OWN CURRENT
+    player.sector once and exports every station/gate/asteroid field/region it
+    finds as a one-shot burst of `sector_object` messages, bracketed by
+    `sector_mirror` begin/end. There is deliberately NO host/guest distinction
+    anywhere in this protocol or the server (see protocol/src/messages.ts's
+    SectorObjectMessage doc comment) - this file is fully symmetric, exactly
+    like XMP_Arena.xml's spawn/despawn handling. A member whose current sector
+    has nothing of interest (the empty Arena sector, or an unpopulated sector)
+    simply exports zero objects (`sector_mirror` begin with objectCount=0,
+    immediately followed by end) - harmless, not a special case anywhere in
+    this file.
+
+    DELIBERATELY NOT ATTEMPTED IN C1 (documented simplifications, not oversights,
+    see docs/C1-messprotokoll.md "Nächste Schritte" for the follow-up plan):
+      - No new "Coop waiting room" gamestart ships with this milestone. PlanMod.md's
+        Phase 2 architecture principle ("Gast startet in leerem Custom-Universum")
+        is not yet implemented as shippable content - for C1, whichever player
+        wants to see the OTHER's sector mirrored simply needs to be in a sector
+        with little/nothing of their own to avoid a confusing double-mirror
+        (both directions run identically). Revisit once a dedicated empty
+        gamestart is worth the added content-authoring surface (same shape as
+        the Arena's four gamestart variants, libraries/{clusters,sectors,zones,
+        galaxy,gamestarts}.xml).
+      - Guest-side proxies are NOT differentiated by objectType yet (station vs.
+        gate vs. asteroid field vs. region all use the exact same placeholder
+        creation call, XMP_Coop_HandleSectorObject below) - objectType is
+        carried on the wire and tracked, but only used for logging in this
+        milestone. A real per-type visual treatment is future work.
+      - No re-export throttling: if a THIRD member joins later, every
+        already-present member (including the guest who received the FIRST
+        export) re-runs XMP_Coop_ExportSector and re-sends the same objects.
+        XMP_Coop_HandleSectorObject's `not $XMP.SectorProxies.{objectId}.exists`
+        guard (mirroring XMP_Arena_HandleSpawn's own idempotency check) makes a
+        redundant re-receive a harmless no-op, so this is accepted rather than
+        solved with e.g. server-side caching (unlike A2's spawn replay-to-late-
+        joiners, sessionManager.ts, this deliberately has no server-side
+        replay/cache for sector_object - see docs/C1-messprotokoll.md).
+      - No despawn/teardown path for sector proxies: PlanMod.md's C1 spec calls
+        this a "statisches" (static), one-time transfer with no further sync,
+        so there is currently no message type or handler that ever removes a
+        $XMP.SectorProxies entry. A session leave/leave-sector event does NOT
+        clean these up (contrast with XMP_Arena_OnExitSector's real ship
+        despawn) - accepted for V1, revisit once C5 ("Sektorwechsel") exists
+        and a guest's mirrored world needs to be torn down and rebuilt for a
+        new sector.
+      - Not cached in the agent's knownSpawns/replayed on a pipe reconnect
+        (agent/src/index.ts) - a local X4 client restart mid-Coop-session loses
+        the mirrored static objects until the next full session (re)join sends
+        a fresh `session` join and re-triggers export. See
+        docs/C1-messprotokoll.md.
+
+    THE SINGLE HIGHEST-RISK ITEM IN THIS FILE: XMP_Coop_FindObjectsOfClass below,
+    the sector-object enumeration itself. Explore of this codebase (prior to C1)
+    found NO existing pattern anywhere in mod/ for walking "every object of a
+    given class in a sector" - A1-A5 only ever read the PLAYER's OWN ship
+    (player.entity.*) or, since A5, player.sector.macro.name as a single scalar
+    comparison, never a collection. XMP_Coop_FindObjectsOfClass assumes a generic
+    `find_object` action exists, taking `class` ('station'/'gate'/'asteroid'/
+    'region') and `sector` attributes plus `multiple="true"`, and that its result
+    can be iterated with `<do_all exact="$Result" counter="$XMP.CoopIndex">`
+    reading `$XMP.CoopIndex.entry` per iteration - the same "one action,
+    parameterized by class" shape used for id/name/position/rotation access
+    below, chosen specifically so that IF this assumption is wrong, fixing it
+    means correcting ONE cue (four call sites, one implementation), not four
+    independently-wrong ones. If `find_object` turns out not to exist, the
+    fallback is per-class actions (`find_station`, `find_gate`, `find_asteroid`,
+    `find_region`, all documented as existing in various community MD
+    references) with the SAME iteration shape - XMP_Coop_ExportSector's four
+    call sites would need their single `<include_interrupt_actions>` target
+    changed, nothing else in this file.
+
+    Further assumptions, in descending risk order:
+      - `.id`/`.macro.name`/`.position`/`.quaternion` are accessible on whatever
+        object reference `$XMP.CoopIndex.entry` yields, mirroring the exact
+        accessor style already used (and unconfirmed, same risk category) for
+        player.entity in XMP_Arena.xml/XMP_Telemetry.xml since A1 - in
+        particular `.quaternion` (not `.rotation`), matching
+        XMP_Telemetry.xml's `player.entity.quaternion` exactly (an internal
+        review round caught an earlier draft of this file using `.rotation`
+        here, inconsistent with that established accessor).
+      - `create_station` is the action used to place a guest-side placeholder for
+        EVERY sector_object type, regardless of its real objectType (station,
+        gate, asteroid field, or region) - see XMP_Coop_HandleSectorObject
+        below. Assumed signature: `<create_station name="$Var" macro="..."
+        sector="player.sector" position="..." rotation="..." owner="ownerless"
+        />`. Unconfirmed; if station placement in particular fails (unlike a
+        ship, a station may have per-macro construction/module requirements
+        vanilla `create_station` calls in mission scripts are known to satisfy
+        automatically - unverified here), the whole guest-side half of this
+        milestone needs a different placement action.
+      - $XMP.CoopPlaceholderMacro ('xmp_coop_placeholder_macro', set in
+        XMP_Coop_HandleSectorObject below): a PURE PLACEHOLDER string, following
+        the same "documented, not verified against the game's own library
+        files" caveat as A5's three region macro placeholders
+        (docs/A5-messprotokoll.md section 9). Must be replaced with a real,
+        confirmed-to-exist macro (a small, cheap, faction-neutral object,
+        e.g. a navigation beacon or similar low-footprint vanilla macro)
+        before this can be tested in-game at all.
+      - `player.sector` is reused here exactly as XMP_Arena_PresenceLoop (A5)
+        already assumes it (`.macro.name`); C1 additionally assumes plain
+        `player.sector` (without `.macro.name`) is itself a valid `sector`
+        attribute value for `find_object`/`create_station`, not just readable
+        for its macro name.
+  -->
+  <cues>
+    <!--
+      Dispatched from XMP_Arena_Dispatch (mod/md/XMP_Arena.xml) whenever a
+      `session` message of ANY action is received - mirrors how that same
+      dispatch branch already also feeds XMP_Arena_HandleSetaStatus, which
+      independently no-ops for actions it doesn't care about. Only "join"
+      triggers an export; every other action (leave/ready/countdown/seta_on/
+      seta_off) is silently ignored here.
+    -->
+    <cue name="XMP_Coop_HandleSessionJoin" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'action'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopRxAction" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.CoopRxAction == 'join'">
+            <do_all>
+              <debug_text text="'[XMultiplayer][Coop] a session member joined, exporting our current sector'" filter="general" />
+              <include_interrupt_actions ref="XMP_Coop_ExportSector" />
+            </do_all>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Host-side (symmetric, see file header): walks player.sector for every
+      station/gate/asteroid field/region it can find and exports each as a
+      `sector_object`, bracketed by `sector_mirror` begin (with the total
+      count, so the receiving end can detect a short transfer) and end.
+      objectId is the underlying game object's own `.id` - reused as the wire
+      id exactly like XMP_Arena_OnEnterSector reuses player.entity.id for
+      spawn.objectId, so an object that is BOTH separately spawned some other
+      way (not the case in C1, but future-proofing the id scheme costs
+      nothing) would still collide consistently rather than silently alias.
+    -->
+    <cue name="XMP_Coop_ExportSector" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.CoopExportObjects" exact="[]" />
+
+          <!-- Data-driven instead of four literal copies of the same three
+               lines (code-review feedback on the C1 draft): find_object's
+               `class` value and this protocol's `objectType` string happen to
+               differ only for asteroid fields ('asteroid' vs 'asteroidfield'),
+               so both are carried side by side rather than assuming one can
+               be derived from the other. Adding a fifth object class later is
+               a one-line addition to this list, not a new copy-pasted block. -->
+          <set_value name="$XMP.CoopClasses" exact="[
+              table[class='station', objectType='station'],
+              table[class='gate', objectType='gate'],
+              table[class='asteroid', objectType='asteroidfield'],
+              table[class='region', objectType='region']
+            ]" />
+          <do_all exact="$XMP.CoopClasses" counter="$XMP.CoopClassIndex">
+            <set_value name="$XMP.CoopFindClass" exact="$XMP.CoopClassIndex.entry.class" />
+            <set_value name="$XMP.CoopFindObjectType" exact="$XMP.CoopClassIndex.entry.objectType" />
+            <include_interrupt_actions ref="XMP_Coop_FindObjectsOfClass" />
+          </do_all>
+
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;sector_mirror&quot;,&quot;action&quot;:&quot;begin&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;objectCount&quot;:' + $XMP.CoopExportObjects.count
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+
+          <do_all exact="$XMP.CoopExportObjects" counter="$XMP.CoopExportIndex">
+            <set_value name="$XMP.CoopExportEntry" exact="$XMP.CoopExportIndex.entry" />
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;sector_object&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;objectId&quot;:&quot;' + $XMP.CoopExportEntry.id + '&quot;'
+                + ',&quot;objectType&quot;:&quot;' + $XMP.CoopExportEntry.objectType + '&quot;'
+                + ',&quot;macroName&quot;:&quot;' + $XMP.CoopExportEntry.macroName + '&quot;'
+                + ',&quot;position&quot;:{&quot;x&quot;:' + $XMP.CoopExportEntry.posX + ',&quot;y&quot;:' + $XMP.CoopExportEntry.posY + ',&quot;z&quot;:' + $XMP.CoopExportEntry.posZ + '}'
+                + ',&quot;rotation&quot;:{&quot;qx&quot;:' + $XMP.CoopExportEntry.rotQX + ',&quot;qy&quot;:' + $XMP.CoopExportEntry.rotQY + ',&quot;qz&quot;:' + $XMP.CoopExportEntry.rotQZ + ',&quot;qw&quot;:' + $XMP.CoopExportEntry.rotQW + '}'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          </do_all>
+
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;sector_mirror&quot;,&quot;action&quot;:&quot;end&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+          <debug_text text="'[XMultiplayer][Coop] exported ' + $XMP.CoopExportObjects.count + ' sector object(s) from ' + player.sector.macro.name" filter="general" />
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Single enumeration primitive reused for all four object classes (see file
+      header, the single highest-risk assumption here): finds every object of
+      $XMP.CoopFindClass in player.sector and appends one entry per match to
+      $XMP.CoopExportObjects (built up across the four calls in
+      XMP_Coop_ExportSector above, then read back out and cleared to []
+      there). Each appended entry carries exactly what the outgoing
+      sector_object JSON needs, read once here rather than re-reading
+      $XMP.CoopIndex.entry's properties again later (by the time
+      XMP_Coop_ExportSector's own do_all runs, $XMP.CoopIndex no longer exists
+      - it is this cue's own loop variable).
+    -->
+    <cue name="XMP_Coop_FindObjectsOfClass" instantiate="false">
+      <actions>
+        <do_all>
+          <find_object name="$XMP.CoopFound" class="$XMP.CoopFindClass" sector="player.sector" multiple="true" />
+          <do_all exact="$XMP.CoopFound" counter="$XMP.CoopIndex">
+            <append_to_list name="$XMP.CoopExportObjects" exact="table[
+                id=$XMP.CoopIndex.entry.id,
+                objectType=$XMP.CoopFindObjectType,
+                macroName=$XMP.CoopIndex.entry.macro.name,
+                posX=$XMP.CoopIndex.entry.position.x,
+                posY=$XMP.CoopIndex.entry.position.y,
+                posZ=$XMP.CoopIndex.entry.position.z,
+                rotQX=$XMP.CoopIndex.entry.quaternion.x,
+                rotQY=$XMP.CoopIndex.entry.quaternion.y,
+                rotQZ=$XMP.CoopIndex.entry.quaternion.z,
+                rotQW=$XMP.CoopIndex.entry.quaternion.w
+              ]" />
+          </do_all>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Dispatched from XMP_Arena_Dispatch on type == 'sector_mirror'. Purely
+      informational bookkeeping: "begin" remembers the promised objectCount and
+      resets a received-counter to 0; "end" compares the two and logs a
+      mismatch instead of silently pretending the transfer was complete (no
+      retry/resume mechanism exists for C1 - see file header). Neither action
+      creates or removes any proxy itself.
+    -->
+    <cue name="XMP_Coop_HandleSectorMirror" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'action'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopMirrorAction" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.CoopMirrorAction == 'begin'">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'objectCount'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopExpectedObjectCount" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.CoopReceivedObjectCount" exact="0" />
+              <debug_text text="'[XMultiplayer][Coop] sector mirror starting, expecting ' + $XMP.CoopExpectedObjectCount + ' object(s)'" filter="general" />
+            </do_all>
+          </do_if>
+          <do_if value="$XMP.CoopMirrorAction == 'end'">
+            <do_all>
+              <do_if value="$XMP.CoopReceivedObjectCount == $XMP.CoopExpectedObjectCount">
+                <debug_text text="'[XMultiplayer][Coop] sector mirror complete: ' + $XMP.CoopReceivedObjectCount + ' object(s)'" filter="general" />
+                <else>
+                  <debug_text text="'[XMultiplayer][Coop] sector mirror ended with a MISMATCH: received ' + $XMP.CoopReceivedObjectCount + ' of ' + $XMP.CoopExpectedObjectCount + ' expected object(s)'" filter="general" />
+                </else>
+              </do_if>
+            </do_all>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      Guest-side (symmetric, see file header): creates a static placeholder for
+      one sector_object, idempotently keyed by objectId exactly like
+      XMP_Arena_HandleSpawn keys $XMP.Proxies - a re-received object (e.g. a
+      later member's join re-triggering the sender's export, see file header
+      "no re-export throttling") is a silent no-op, not a duplicate. Kept in a
+      SEPARATE table ($XMP.SectorProxies) from $XMP.Proxies on purpose: nothing
+      in XMP_Arena_DestroyProxy, the AI-script attach/detach logic, or A4's
+      hp_state/hit-detection handling should ever iterate or touch a static
+      sector object, and vice versa - keeping the tables distinct makes that
+      true by construction rather than by convention.
+
+      Uses ONE placeholder macro for every objectType (see file header
+      "guest-side proxies are NOT differentiated by objectType yet") -
+      objectType/macroName are still extracted and stored on the entry for
+      logging and future per-type handling, just not acted on differently yet.
+    -->
+    <cue name="XMP_Coop_HandleSectorObject" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'objectId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopRxObjectId" exact="$XMP.ExtractValue" />
+
+          <do_if value="not $XMP.SectorProxies.{$XMP.CoopRxObjectId}.exists">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'objectType'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxObjectType" exact="$XMP.ExtractValue" />
+
+              <set_value name="$XMP.ExtractKey" exact="'position'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxPositionJson" exact="$XMP.ExtractValue" />
+
+              <set_value name="$XMP.ExtractKey" exact="'rotation'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxRotationJson" exact="$XMP.ExtractValue" />
+
+              <set_value name="$XMP.RxLine" exact="$XMP.CoopRxPositionJson" />
+              <set_value name="$XMP.ExtractKey" exact="'x'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxPosX" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'y'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxPosY" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'z'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxPosZ" exact="$XMP.ExtractValue.{tonumber}" />
+
+              <set_value name="$XMP.RxLine" exact="$XMP.CoopRxRotationJson" />
+              <set_value name="$XMP.ExtractKey" exact="'qx'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxRotQX" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qy'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxRotQY" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qz'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxRotQZ" exact="$XMP.ExtractValue.{tonumber}" />
+              <set_value name="$XMP.ExtractKey" exact="'qw'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxRotQW" exact="$XMP.ExtractValue.{tonumber}" />
+
+              <!-- Placeholder macro name - see file header
+                   "$XMP.CoopPlaceholderMacro". Must be replaced with a
+                   real, confirmed macro name before this can run in-game. -->
+              <set_value name="$XMP.CoopPlaceholderMacro" exact="'xmp_coop_placeholder_macro'" />
+
+              <create_station name="$XMP.NewSectorProxy" macro="$XMP.CoopPlaceholderMacro" sector="player.sector"
+                position="table[x=$XMP.CoopRxPosX, y=$XMP.CoopRxPosY, z=$XMP.CoopRxPosZ]"
+                rotation="table[x=$XMP.CoopRxRotQX, y=$XMP.CoopRxRotQY, z=$XMP.CoopRxRotQZ, w=$XMP.CoopRxRotQW]"
+                owner="ownerless" />
+              <set_value name="$XMP.SectorProxies.{$XMP.CoopRxObjectId}" exact="$XMP.NewSectorProxy" />
+              <set_value name="$XMP.SectorProxyTypes.{$XMP.CoopRxObjectId}" exact="$XMP.CoopRxObjectType" />
+              <set_value name="$XMP.CoopReceivedObjectCount" exact="$XMP.CoopReceivedObjectCount + 1" />
+              <debug_text text="'[XMultiplayer][Coop] mirrored ' + $XMP.CoopRxObjectType + ' objectId=' + $XMP.CoopRxObjectId" filter="general" />
+            </do_all>
+            <else>
+              <debug_text text="'[XMultiplayer][Coop] sector_object for already-known objectId=' + $XMP.CoopRxObjectId + ', ignoring'" filter="general" />
+            </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+  </cues>
+</mdscript>

@@ -105,6 +105,27 @@ export function serializeCanonical(msg: ProtocolMessage): string {
         from: msg.from,
         text: msg.text,
       });
+    case "sector_object":
+      return JSON.stringify({
+        v: msg.v,
+        type: msg.type,
+        seq: msg.seq,
+        ts: msg.ts,
+        objectId: msg.objectId,
+        objectType: msg.objectType,
+        macroName: msg.macroName,
+        position: canonicalVector3(msg.position),
+        rotation: canonicalQuaternion(msg.rotation),
+      });
+    case "sector_mirror":
+      return JSON.stringify({
+        v: msg.v,
+        type: msg.type,
+        seq: msg.seq,
+        ts: msg.ts,
+        action: msg.action,
+        ...(msg.objectCount !== undefined ? { objectCount: msg.objectCount } : {}),
+      });
   }
 }
 

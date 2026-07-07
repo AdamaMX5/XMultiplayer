@@ -64,6 +64,16 @@ test("roundtrip parse -> serialize -> parse is stable for every message type", (
     fire_event: { ...base, type: "fire_event", sourceId: "ship-1", weapon: "weapon_x", origin: { x: 0, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } },
     session: { ...base, type: "session", action: "join", sessionCode: "arena-1", playerName: "Alice" },
     chat: { ...base, type: "chat", from: "Alice", text: "gg" },
+    sector_object: {
+      ...base,
+      type: "sector_object",
+      objectId: "station-1",
+      objectType: "station",
+      macroName: "station_arg_shipyard_01_macro",
+      position: { x: 1, y: 2, z: 3 },
+      rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+    },
+    sector_mirror: { ...base, type: "sector_mirror", action: "begin", objectCount: 12 },
   };
 
   for (const [type, sample] of Object.entries(samples)) {
@@ -144,6 +154,22 @@ test("session: includes both optional fields when both are present, neither when
     const canonical = serializeCanonical(withNeither.message);
     assert.equal(canonical.includes("playerName"), false);
     assert.equal(canonical.includes("countdownSeconds"), false);
+  }
+});
+
+test("sector_mirror: objectCount (C1) is included when present, omitted (not null) when absent", () => {
+  const withCount = parseMessage(JSON.stringify({ ...base, type: "sector_mirror", action: "begin", objectCount: 7 }));
+  assert.equal(withCount.ok, true);
+  if (withCount.ok) {
+    const canonical = JSON.parse(serializeCanonical(withCount.message));
+    assert.equal(canonical.objectCount, 7);
+  }
+
+  const withoutCount = parseMessage(JSON.stringify({ ...base, type: "sector_mirror", action: "end" }));
+  assert.equal(withoutCount.ok, true);
+  if (withoutCount.ok) {
+    const canonical = serializeCanonical(withoutCount.message);
+    assert.equal(canonical.includes("objectCount"), false);
   }
 });
 

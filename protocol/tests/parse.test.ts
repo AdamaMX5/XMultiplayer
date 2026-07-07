@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseMessage } from "../src/parse.js";
-import { MAX_MESSAGE_BYTES } from "../src/limits.js";
+import { MAX_MACRO_NAME_LENGTH, MAX_MESSAGE_BYTES, MAX_SECTOR_OBJECTS_PER_MIRROR } from "../src/limits.js";
 
 const base = { v: 1, seq: 1, ts: 1_720_000_000_000 };
 
@@ -197,4 +197,135 @@ test("rejects chat missing text", () => {
   const msg = { ...base, type: "chat", from: "Alice" };
   const result = parseMessage(JSON.stringify(msg));
   assert.equal(result.ok, false);
+});
+
+// --- C1 "Statischer Sektor-Mirror" ---
+
+test("accepts a valid sector_object", () => {
+  const msg = {
+    ...base,
+    type: "sector_object",
+    objectId: "station-1",
+    objectType: "station",
+    macroName: "station_arg_shipyard_01_macro",
+    position: { x: 1, y: 2, z: 3 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.message.type, "sector_object");
+});
+
+test("accepts every sector_object objectType", () => {
+  for (const objectType of ["station", "gate", "asteroidfield", "region"]) {
+    const msg = {
+      ...base,
+      type: "sector_object",
+      objectId: "obj-1",
+      objectType,
+      macroName: "some_macro",
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+    };
+    const result = parseMessage(JSON.stringify(msg));
+    assert.equal(result.ok, true, `objectType "${objectType}" should be accepted`);
+  }
+});
+
+test("rejects sector_object with an unknown objectType", () => {
+  const msg = {
+    ...base,
+    type: "sector_object",
+    objectId: "obj-1",
+    objectType: "planet",
+    macroName: "some_macro",
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects sector_object with a macroName over the max length", () => {
+  const msg = {
+    ...base,
+    type: "sector_object",
+    objectId: "obj-1",
+    objectType: "station",
+    macroName: "x".repeat(MAX_MACRO_NAME_LENGTH + 1),
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("accepts a sector_object with a macroName right at the max length", () => {
+  const msg = {
+    ...base,
+    type: "sector_object",
+    objectId: "obj-1",
+    objectType: "station",
+    macroName: "x".repeat(MAX_MACRO_NAME_LENGTH),
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("rejects sector_object with a malformed rotation", () => {
+  const msg = {
+    ...base,
+    type: "sector_object",
+    objectId: "obj-1",
+    objectType: "gate",
+    macroName: "some_macro",
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0 },
+  };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("accepts a valid sector_mirror begin with objectCount", () => {
+  const msg = { ...base, type: "sector_mirror", action: "begin", objectCount: 12 };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("accepts a valid sector_mirror end without objectCount", () => {
+  const msg = { ...base, type: "sector_mirror", action: "end" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("rejects sector_mirror with an invalid action", () => {
+  const msg = { ...base, type: "sector_mirror", action: "cancel" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects sector_mirror with a negative objectCount", () => {
+  const msg = { ...base, type: "sector_mirror", action: "begin", objectCount: -1 };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects sector_mirror with a non-integer objectCount", () => {
+  const msg = { ...base, type: "sector_mirror", action: "begin", objectCount: 1.5 };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects sector_mirror with an objectCount over MAX_SECTOR_OBJECTS_PER_MIRROR", () => {
+  const msg = { ...base, type: "sector_mirror", action: "begin", objectCount: MAX_SECTOR_OBJECTS_PER_MIRROR + 1 };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("accepts sector_mirror with an objectCount right at MAX_SECTOR_OBJECTS_PER_MIRROR", () => {
+  const msg = { ...base, type: "sector_mirror", action: "begin", objectCount: MAX_SECTOR_OBJECTS_PER_MIRROR };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
 });

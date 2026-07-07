@@ -74,6 +74,26 @@ explicitly **deferred, not-yet-attempted** items: real weapon-loadout
 enumeration and true pause detection (reasoned to likely be infeasible via MD
 polling at all, see that doc's section 8).
 
+Milestone C1 (PlanMod.md Phase 2, "Statischer Sektor-Mirror" -- the first
+milestone of the Coop-in-the-host's-universe track, `docs/C1-messprotokoll.md`):
+a new `md/XMP_Coop.xml`, plugged into `XMP_Arena.xml`'s existing dispatch via
+three new branches. Whenever ANY session member's `session` `join` is received,
+every OTHER member walks its OWN current `player.sector` (stations, gates,
+asteroid fields, regions) and exports it once as a burst of `sector_object`
+messages bracketed by `sector_mirror` begin/end; the receiving side spawns each
+as a static, non-piloted placeholder. Deliberately symmetric, not host/guest --
+this protocol and server have no such distinction anywhere, so a member with
+nothing of interest in its own sector (the Arena, or an empty sector) simply
+exports zero objects. The new message types (`protocol/src/messages.ts`) have
+no per-object ownership model server-side (static scenery has no "owner" the
+way a player's ship does), so `server/src/server.ts` needed no new branch, only
+a comment documenting that the existing generic broadcast fallthrough is
+deliberate. See `docs/C1-messprotokoll.md` for the full, and for this milestone
+unusually large, list of open assumptions -- most notably that this is the
+first milestone needing to enumerate a COLLECTION of sector objects (rather
+than read the player's own ship or a single scalar), for which no prior
+pattern existed anywhere in this codebase.
+
 **Status: PLAUSIBLE, not VERIFIED (mod side); the server/agent-side logic IS
 VERIFIED** (real `node:test` tests throughout `server/tests/` and
 `agent/tests/`). This extension has not been loaded or run inside X4 (no game
@@ -82,14 +102,17 @@ be syntactically valid, but the Mission Director/AI-script semantics (cue
 timing, the exact SirNukes Named_Pipes API surface, whether MD can parse a
 received JSON string at all, the `<aiscript>` root shape, `move.to.position`, and
 `object.blackboard` as the MD/AI-script data channel from A3, whether
-`event_object_attacked`/`event_object_fired` exist as assumed (A4), and now --
-A5 -- whether `player.sector`/`player.entity.hullmax`/`player.timewarp` exist as
-assumed) are assumptions documented inline in `md/XMP_Telemetry.xml`/
-`md/XMP_Arena.xml`/`aiscripts/XMP.ProxyPilot.xml` and in
-`docs/A1-messprotokoll.md` through `docs/A5-messprotokoll.md`. In-game validation
-is the first open task for all five milestones; A2's JSON-parsing assumption must
-be validated before A3-A5 can be tested at all (no state_update/hit_report/
-hp_state/session data reaches the blackboard or the player's own ship otherwise).
+`event_object_attacked`/`event_object_fired` exist as assumed (A4), whether
+`player.sector`/`player.entity.hullmax`/`player.timewarp` exist as assumed
+(A5), and now -- C1 -- whether a `find_object`-style sector enumeration and
+`create_station`-style placeholder placement exist as assumed) are assumptions
+documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
+`md/XMP_Coop.xml`/`aiscripts/XMP.ProxyPilot.xml` and in
+`docs/A1-messprotokoll.md` through `docs/C1-messprotokoll.md`. In-game
+validation is the first open task for all six milestones; A2's JSON-parsing
+assumption must be validated before A3-C1 can be tested at all (no
+state_update/hit_report/hp_state/session/sector_object data reaches the
+blackboard or the player's own ship otherwise).
 
 ## Dependencies
 

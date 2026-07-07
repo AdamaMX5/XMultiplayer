@@ -8,3 +8,15 @@
  *   - the relay server's WebSocketServer `maxPayload` option (server/src/server.ts)
  */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
+
+/**
+ * C1 "Statischer Sektor-Mirror": sanity cap on `sector_mirror`'s `objectCount`
+ * (begin) and, separately, a length cap on `sector_object.macroName`. Unlike
+ * `spawn.shipType`, there is no whitelist a station/gate/asteroid-field/region
+ * macro name can be checked against yet (SHIP_MACRO_WHITELIST is ship-specific,
+ * and no equivalent exists for sector scenery, see shipMacros.ts) -- these two
+ * cheap, whitelist-free bounds are what stands in for one until a real macro
+ * list is confirmed against the game's own library files.
+ */
+export const MAX_SECTOR_OBJECTS_PER_MIRROR = 2000;
+export const MAX_MACRO_NAME_LENGTH = 64;

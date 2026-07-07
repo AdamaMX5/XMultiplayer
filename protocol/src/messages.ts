@@ -130,6 +130,51 @@ export interface ChatMessage extends EnvelopeBase {
   text: string;
 }
 
+/**
+ * C1 "Statischer Sektor-Mirror" (PlanMod.md Phase 2): one message per static
+ * sector object (station/gate/asteroid field/region), sent by whichever session
+ * member has that object in their own `player.sector` at the moment a `session`
+ * `join` is received (see mod/md/XMP_Coop.xml's XMP_Coop_HandleSessionJoin --
+ * there is no host/guest distinction anywhere in this protocol or the server, so
+ * the mod treats every member symmetrically: each exports its own current
+ * sector, and a member whose sector has nothing of interest -- e.g. the empty
+ * Arena sector, or an as-yet-unpopulated guest sector -- simply exports zero
+ * objects). Modeled as one message per object (like `spawn`) rather than a
+ * single message carrying an array, since XMP_Arena_ExtractField (the MD-side
+ * field extractor every inbound message is read through) only handles flat,
+ * non-nested JSON values -- an array of objects would need a second, unproven
+ * extraction mechanism this protocol has no existing pattern for.
+ */
+export type SectorObjectType = "station" | "gate" | "asteroidfield" | "region";
+
+export interface SectorObjectMessage extends EnvelopeBase {
+  type: "sector_object";
+  objectId: string;
+  objectType: SectorObjectType;
+  macroName: string;
+  position: Vector3;
+  rotation: Quaternion;
+}
+
+/**
+ * Brackets a burst of `sector_object` messages (C1) so the receiving end knows
+ * when a sector export starts and ends, and (via `objectCount` on "begin") how
+ * many `sector_object` messages to expect -- useful to detect a transfer that
+ * was cut short (e.g. a mid-export disconnect) without needing its own timeout
+ * logic. Deliberately its own message type rather than reusing SessionAction:
+ * a sector export is about sector CONTENT, not session membership, and the two
+ * are allowed to happen independently (e.g. a re-export triggered by a second
+ * member joining later).
+ */
+export type SectorMirrorAction = "begin" | "end";
+
+export interface SectorMirrorMessage extends EnvelopeBase {
+  type: "sector_mirror";
+  action: SectorMirrorAction;
+  /** Only meaningful for action === "begin". */
+  objectCount?: number;
+}
+
 export type ProtocolMessage =
   | StateUpdateMessage
   | SpawnMessage
@@ -138,6 +183,8 @@ export type ProtocolMessage =
   | HpStateMessage
   | FireEventMessage
   | SessionMessage
-  | ChatMessage;
+  | ChatMessage
+  | SectorObjectMessage
+  | SectorMirrorMessage;
 
 export type MessageType = ProtocolMessage["type"];

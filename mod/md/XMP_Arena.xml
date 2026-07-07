@@ -94,6 +94,13 @@
     hit locally. No server-side lag compensation exists or is planned for V1; see
     docs/A4-messprotokoll.md and PlanMod.md 0.4/1.3 for the accepted-limitations
     framing this follows.
+
+    Milestone C1 (PlanMod.md Phase 2, "Statischer Sektor-Mirror"): XMP_Arena_Dispatch
+    above now ALSO routes `session`/`sector_object`/`sector_mirror` to
+    mod/md/XMP_Coop.xml's handlers - that file's own header carries the full
+    assumption list for this milestone (its enumeration of sector content is the
+    single highest-risk item added since A5). Nothing in THIS file changed besides
+    the three new dispatch branches.
   -->
   <cues>
     <!--
@@ -333,6 +340,20 @@
                checks the exact action, this is just the type-level dispatch. -->
           <do_if value="$XMP.RxType == 'session'">
             <include_interrupt_actions ref="XMP_Arena_HandleSetaStatus" />
+          </do_if>
+          <!-- C1 (mod/md/XMP_Coop.xml): every `session` message ALSO reaches the Coop
+               handler, independently of the SETA one above - both branches run for
+               the same incoming type, exactly like this. XMP_Coop_HandleSessionJoin
+               itself checks for action == 'join' and no-ops otherwise. -->
+          <do_if value="$XMP.RxType == 'session'">
+            <include_interrupt_actions ref="XMP_Coop_HandleSessionJoin" />
+          </do_if>
+          <!-- C1: static sector scenery export/import, see mod/md/XMP_Coop.xml. -->
+          <do_if value="$XMP.RxType == 'sector_object'">
+            <include_interrupt_actions ref="XMP_Coop_HandleSectorObject" />
+          </do_if>
+          <do_if value="$XMP.RxType == 'sector_mirror'">
+            <include_interrupt_actions ref="XMP_Coop_HandleSectorMirror" />
           </do_if>
           <!-- Anything else (e.g. hit_report, which only ever flows client -> server,
                never back down to a client) is silently ignored: unknown/irrelevant

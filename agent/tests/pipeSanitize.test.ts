@@ -35,6 +35,42 @@ test("leaves other message types completely untouched", () => {
   assert.deepEqual(sanitizeForPipe(msg), msg);
 });
 
+test("sanitizes both sector_object.objectId and macroName (C1) for MD-breaking characters, without touching objectType", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "sector_object",
+    objectId: "station-{evil},1",
+    objectType: "station",
+    macroName: "station_{evil}, macro",
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = sanitizeForPipe(msg) as typeof msg;
+  assert.equal(result.objectId, "station-evil1");
+  assert.equal(result.macroName, "station_evil macro");
+  assert.equal(result.objectType, "station");
+});
+
+test("leaves a clean sector_object's objectId/macroName as-is", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "sector_object",
+    objectId: "station-1",
+    objectType: "station",
+    macroName: "station_arg_shipyard_01_macro",
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
+  };
+  const result = sanitizeForPipe(msg) as typeof msg;
+  assert.equal(result.objectId, "station-1");
+  assert.equal(result.macroName, "station_arg_shipyard_01_macro");
+});
+
+test("leaves sector_mirror completely untouched (no free-form text fields)", () => {
+  const msg: ProtocolMessage = { ...base, type: "sector_mirror", action: "begin", objectCount: 5 };
+  assert.deepEqual(sanitizeForPipe(msg), msg);
+});
+
 test("does not mutate the original message object", () => {
   const msg: ProtocolMessage = { ...base, type: "chat", from: "{Clan} Bob", text: "hi" };
   const original = { ...msg };

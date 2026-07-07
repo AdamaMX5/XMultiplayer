@@ -5,6 +5,8 @@ import type {
   HitReportMessage,
   HpStateMessage,
   ProtocolMessage,
+  SectorMirrorMessage,
+  SectorObjectMessage,
   SessionMessage,
   SpawnMessage,
   StateUpdateMessage,
@@ -19,7 +21,7 @@ import {
   isStringArray,
   isVector3,
 } from "./validators.js";
-import { MAX_MESSAGE_BYTES } from "./limits.js";
+import { MAX_MACRO_NAME_LENGTH, MAX_MESSAGE_BYTES, MAX_SECTOR_OBJECTS_PER_MIRROR } from "./limits.js";
 
 export type ParseResult =
   | { ok: true; message: ProtocolMessage }
@@ -71,6 +73,10 @@ export function parseMessage(json: string): ParseResult {
       return validateSession(obj);
     case "chat":
       return validateChat(obj);
+    case "sector_object":
+      return validateSectorObject(obj);
+    case "sector_mirror":
+      return validateSectorMirror(obj);
     default:
       return fail(`unknown message type: ${String(obj.type)}`);
   }
@@ -152,4 +158,36 @@ function validateChat(obj: Fields): ParseResult {
   if (!isString(obj, "from")) return fail("chat.from must be a string");
   if (!isString(obj, "text")) return fail("chat.text must be a string");
   return ok(obj as unknown as ChatMessage);
+}
+
+const SECTOR_OBJECT_TYPES = new Set(["station", "gate", "asteroidfield", "region"]);
+
+function validateSectorObject(obj: Fields): ParseResult {
+  if (!isString(obj, "objectId")) return fail("sector_object.objectId must be a string");
+  if (typeof obj.objectType !== "string" || !SECTOR_OBJECT_TYPES.has(obj.objectType)) {
+    return fail('sector_object.objectType must be one of "station", "gate", "asteroidfield", "region"');
+  }
+  if (!isString(obj, "macroName")) return fail("sector_object.macroName must be a string");
+  if ((obj.macroName as string).length > MAX_MACRO_NAME_LENGTH) {
+    return fail(`sector_object.macroName exceeds max length of ${MAX_MACRO_NAME_LENGTH}`);
+  }
+  if (!isVector3(obj.position)) return fail("sector_object.position must be a {x,y,z} vector");
+  if (!isQuaternion(obj.rotation)) return fail("sector_object.rotation must be a {qx,qy,qz,qw} quaternion");
+  return ok(obj as unknown as SectorObjectMessage);
+}
+
+const SECTOR_MIRROR_ACTIONS = new Set(["begin", "end"]);
+
+function validateSectorMirror(obj: Fields): ParseResult {
+  if (typeof obj.action !== "string" || !SECTOR_MIRROR_ACTIONS.has(obj.action)) {
+    return fail('sector_mirror.action must be one of "begin", "end"');
+  }
+  if (!isOptionalNumber(obj, "objectCount")) return fail("sector_mirror.objectCount must be a number if present");
+  if (obj.objectCount !== undefined) {
+    const count = obj.objectCount as number;
+    if (count < 0 || !Number.isInteger(count) || count > MAX_SECTOR_OBJECTS_PER_MIRROR) {
+      return fail(`sector_mirror.objectCount must be an integer between 0 and ${MAX_SECTOR_OBJECTS_PER_MIRROR}`);
+    }
+  }
+  return ok(obj as unknown as SectorMirrorMessage);
 }
