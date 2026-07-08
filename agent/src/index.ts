@@ -20,6 +20,24 @@ const latencyTracker = new LatencyTracker();
 const sessionState = new SessionState();
 /** True once the WS has connected at least once, so onOpen can tell a genuine reconnect apart from the very first connect. */
 let hasConnectedBefore = false;
+/**
+ * C2 "Coop" self-announce: true once the explicit-session join line has been
+ * successfully WRITTEN into the pipe (either from onOpen directly, or from
+ * onClientConnected once the game connects later, via deliverCoopSelfJoin --
+ * whichever fires first). Deliberately tracks delivery only, not whether MD
+ * actually acted on it yet -- mod/md/XMP_Coop.xml's own
+ * $XMP.CoopPendingSelfAnnounce/XMP_Coop_SelfAnnounceCheck independently retry
+ * (poll once a second) until the player's ship exists, so this flag does not
+ * need to know or care about that; it only needs to guarantee the line is
+ * handed to MD AT LEAST once. Deliberately a ONE-SHOT, not repeated on every
+ * later pipe reconnect: unlike knownSpawns (replayed in full on every pipe
+ * reconnect, see that constant's own doc comment), a mid-session game restart
+ * re-announcing itself is out of scope for C2, the same class of accepted
+ * limitation C1 already documents for the sector mirror
+ * (docs/C1-messprotokoll.md) -- revisit together if a later milestone needs
+ * real local-reconnect continuity for either.
+ */
+let coopSelfAnnounceDeliveredToPipe = false;
 
 /**
  * Locally cached copy of every currently-known remote spawn (objectId -> pipe-ready
@@ -95,6 +113,14 @@ const ws = new ReconnectingWebSocket({
       const line = JSON.stringify(joinMsg);
       ws.send(line);
       sessionState.observeOutbound(joinMsg, line);
+      // C2 "Coop" self-announce: an explicit-session join otherwise never
+      // reaches MD at all (it goes straight to the relay over the WS, unlike
+      // the mod's own Arena-presence-triggered join, which is sent FROM the
+      // pipe). Looping it back down lets XMP_Coop_HandleSessionJoin recognize
+      // its own join (playerName == player.name) and announce its own ship.
+      // A no-op if the game hasn't connected to the pipe yet -- onClientConnected
+      // below covers that ordering by retrying once the game DOES connect.
+      deliverCoopSelfJoin(line);
     }
     hasConnectedBefore = true;
   },
@@ -109,6 +135,16 @@ const pipe = new PipeServer(pipePath(config.pipeName), {
   onListening: () => console.log(`[agent] waiting for X4 on pipe ${pipePath(config.pipeName)}`),
   onClientConnected: () => {
     console.log("[agent] X4 client connected to pipe");
+    // C2: covers the reverse connection ordering from the onOpen loopback
+    // above (the game connecting to the pipe AFTER the WS join was already
+    // sent) -- whichever of the two fires first successfully is the one that
+    // actually reaches MD; deliverCoopSelfJoin's own guard stops this from
+    // firing again on a LATER pipe reconnect (see coopSelfAnnounceDeliveredToPipe's
+    // doc comment -- deliberately one-shot, unlike knownSpawns below).
+    if (config.sessionCodeExplicit) {
+      const joinLine = sessionState.lastJoinLine();
+      if (joinLine) deliverCoopSelfJoin(joinLine);
+    }
     replayKnownSpawns();
   },
   onClientDisconnected: () => console.log("[agent] X4 client disconnected (game closed?), waiting for reconnect"),
@@ -117,6 +153,25 @@ const pipe = new PipeServer(pipePath(config.pipeName), {
   onLine: (line) => handleLine(line),
 });
 pipe.start();
+
+/**
+ * C2 "Coop" self-announce: writes `raw` (our own explicit-session join line)
+ * into the pipe at most once per WS connection, sanitized the same way any
+ * other pipe-bound message is (sanitizeForPipe, normally only applied to
+ * relay-origin messages in handleRemoteMessage below -- this is the one
+ * pipe-bound line that originates locally instead, from `config.playerName`,
+ * e.g. an operator's `--player-name`/XMP_PLAYER_NAME choice, not sanitized
+ * anywhere else before this). No-op if already delivered, or if `raw` fails
+ * to parse (defensive; it's always our own just-serialized SessionMessage in
+ * practice, see both call sites in the `ws`/`pipe` config objects above).
+ */
+function deliverCoopSelfJoin(raw: string): void {
+  if (coopSelfAnnounceDeliveredToPipe) return;
+  const parsed = parseMessage(raw);
+  if (!parsed.ok) return;
+  const sanitizedLine = JSON.stringify(sanitizeForPipe(parsed.message));
+  if (pipe.write(sanitizedLine)) coopSelfAnnounceDeliveredToPipe = true;
+}
 
 /** Sends every currently-known remote spawn down the pipe; see `knownSpawns` above. */
 function replayKnownSpawns(): void {

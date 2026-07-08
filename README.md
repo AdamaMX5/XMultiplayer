@@ -45,14 +45,16 @@ automatisch in der Session, ganz ohne Lobby/Ready-Check/Session-Code-Dialog.
             Erkennung (Sektor-Ein-/Austritt = Session Join/Leave + Spawn/Despawn mit echtem
             Schiff), Dead Reckoning, seit A4 Kampf (lokale Unverwundbarkeit, Treffer-Erkennung,
             hp_state), seit A5 SETA-Erkennung (Proxy-Einfrieren) und drei Kartenvarianten, seit
-            C1 statischer Sektor-Mirror (Phase 2 "Coop", XMP_Coop.xml)
+            C1 statischer Sektor-Mirror (Phase 2 "Coop", XMP_Coop.xml), seit C2 Host/Gast-
+            Schiffs-Spiegelung (wiederverwendet die Arena-Proxy-Logik unverändert)
 /agent/     Node.js-Agent (Named-Pipe-Server, WebSocket-Client, Simulator für Tests ohne X4),
-            seit A5 dynamische Session (kein fixer Join beim Connect) mit Reconnect-Wiederherstellung
+            seit A5 dynamische Session (kein fixer Join beim Connect) mit Reconnect-Wiederherstellung,
+            seit C2 Loopback des eigenen expliziten Session-Beitritts in die lokale Pipe
 /server/    Node.js-Relay-Server (Sessions, seit A4 HP-Autorität für den Kampf, seit A5 zusätzlich
             Kill-Feed und konfigurierbares Schiffsklassen-Regel-Preset)
 /protocol/  Geteiltes Nachrichtenprotokoll v1 (TS-Typen + JSON-Schema + Validierung), seit C1
             zusätzlich sector_object/sector_mirror für den statischen Sektor-Mirror
-/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1- bis C1-messprotokoll.md)
+/docs/      Pläne (PlanMod.md, PlanEngine.md) und Messprotokolle (A1- bis C2-messprotokoll.md)
 ```
 
 ## Setup

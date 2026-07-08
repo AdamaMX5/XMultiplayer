@@ -63,6 +63,21 @@ function collectLines(socket: Socket): { lines: string[] } {
   return state;
 }
 
+/**
+ * All these tests set XMP_SESSION (config.sessionCodeExplicit), purely so the
+ * agent auto-joins at connect time without a real mod driving it -- an A5
+ * pattern predating C2. Since C2, that same explicit join is ALSO looped back
+ * into the pipe once (see index.ts's coopSelfAnnounceDeliveredToPipe), so the
+ * FIRST pipe connect in every one of these tests receives a `session` `join`
+ * line before whatever the test itself is actually about. Filtering it out
+ * here keeps these tests' assertions about the SPAWN/DESPAWN relay behavior
+ * unaffected by that unrelated, already-covered-elsewhere C2 behavior
+ * (agent/tests/sessionState.test.ts's lastJoinLine() tests own that instead).
+ */
+function nonSessionLines(lines: string[]): string[] {
+  return lines.filter((line) => JSON.parse(line).type !== "session");
+}
+
 interface AgentTestContext {
   /** The fake relay server's side of the agent's WebSocket connection -- send() on this simulates a message from the relay. */
   agentSocket: WebSocket;
@@ -124,7 +139,7 @@ test(
         // 3. Oversized payload (over protocol/src/limits.ts MAX_MESSAGE_BYTES) must never reach the pipe.
         agentSocket.send(JSON.stringify({ v: 1, type: "chat", seq: 1, ts: Date.now(), from: "x", text: "y".repeat(200_000) }));
         await new Promise((resolve) => setTimeout(resolve, 300));
-        assert.deepEqual(received.lines, [], "invalid relay messages must not be written to the pipe");
+        assert.deepEqual(nonSessionLines(received.lines), [], "invalid relay messages must not be written to the pipe");
 
         // 4. A valid, well-formed spawn message (whitelisted shipType, see
         //    protocol/src/shipMacros.ts) must reach the pipe, canonically
@@ -143,8 +158,9 @@ test(
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 300));
-        assert.equal(received.lines.length, 1, "a valid relay message must be forwarded into the pipe");
-        assert.deepEqual(JSON.parse(received.lines[0]), {
+        const spawnLines = nonSessionLines(received.lines);
+        assert.equal(spawnLines.length, 1, "a valid relay message must be forwarded into the pipe");
+        assert.deepEqual(JSON.parse(spawnLines[0]), {
           v: 1,
           type: "spawn",
           seq: 1,
@@ -181,7 +197,7 @@ test(
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 300));
-        assert.deepEqual(received.lines, [], "a spawn with an unwhitelisted shipType must never reach the pipe");
+        assert.deepEqual(nonSessionLines(received.lines), [], "a spawn with an unwhitelisted shipType must never reach the pipe");
       } finally {
         gameSocket?.destroy();
       }
@@ -212,8 +228,9 @@ test(
         gameSocket = await connectToPipeWithRetry(path);
         const received = collectLines(gameSocket);
         await new Promise((resolve) => setTimeout(resolve, 300));
-        assert.equal(received.lines.length, 1, "a spawn received before the game connected must be replayed once it does");
-        assert.deepEqual(JSON.parse(received.lines[0]), spawnPayload);
+        const spawnLines = nonSessionLines(received.lines);
+        assert.equal(spawnLines.length, 1, "a spawn received before the game connected must be replayed once it does");
+        assert.deepEqual(JSON.parse(spawnLines[0]), spawnPayload);
       } finally {
         gameSocket?.destroy();
       }
@@ -263,4 +280,119 @@ test(
         secondGame?.destroy();
       }
     })
+);
+
+/** Lines whose `type` is `session` -- the mirror image of nonSessionLines(). */
+function sessionLines(lines: string[]): unknown[] {
+  return lines.map((line) => JSON.parse(line)).filter((parsed) => (parsed as { type: string }).type === "session");
+}
+
+test(
+  "C2: an explicit-session join is looped back into the pipe exactly once (game connects to the pipe AFTER the WS join), so MD can recognize and react to its own join",
+  { timeout: 30_000 },
+  () =>
+    withAgentProcess(async ({ pipePath: path }) => {
+      // No agentSocket interaction here at all -- withAgentProcess's XMP_SESSION
+      // env var alone is what makes the agent send its own explicit join, the
+      // exact scenario XMP_Coop_HandleSessionJoin's "self" branch depends on.
+      // withAgentProcess always waits for the WS connection (and therefore the
+      // join) before this callback runs, so connecting the pipe client here
+      // deterministically exercises the onClientConnected fallback path in
+      // index.ts's deliverCoopSelfJoin, NOT the onOpen direct-write path --
+      // see the next test for that other ordering.
+      let firstGame: Socket | undefined;
+      let secondGame: Socket | undefined;
+      try {
+        firstGame = await connectToPipeWithRetry(path);
+        const firstReceived = collectLines(firstGame);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        const joinLines = sessionLines(firstReceived.lines);
+        assert.equal(joinLines.length, 1, "exactly one session join must be looped back into the pipe");
+        const parsed = joinLines[0] as { action: string; sessionCode: string; playerName: string };
+        assert.equal(parsed.action, "join");
+        assert.equal(parsed.sessionCode, "e2e-session");
+        assert.equal(parsed.playerName, "e2e-tester");
+
+        // A later pipe reconnect (e.g. the game restarting) must NOT repeat the
+        // loopback -- deliberately one-shot, see index.ts's
+        // coopSelfAnnounceDeliveredToPipe.
+        firstGame.destroy();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        secondGame = await connectToPipeWithRetry(path);
+        const secondReceived = collectLines(secondGame);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.deepEqual(sessionLines(secondReceived.lines), [], "the self-join loopback must not repeat on a later pipe reconnect");
+      } finally {
+        firstGame?.destroy();
+        secondGame?.destroy();
+      }
+    })
+);
+
+test(
+  "C2: an explicit-session join is looped back into the pipe when the game connects to the pipe BEFORE the WS join is sent",
+  { timeout: 30_000 },
+  async () => {
+    // Deliberately does NOT use withAgentProcess: that helper always awaits the
+    // WS connection (and therefore the join) before handing control to the
+    // test, which can only ever exercise index.ts's onClientConnected fallback
+    // (see the previous test). This test needs the OPPOSITE ordering --
+    // connecting the pipe client before the agent's WS/join even exists yet --
+    // to exercise onOpen's own direct pipe.write(line) call instead. The pipe
+    // path is deterministic ahead of spawning (it's built from a pipeName this
+    // test picks itself), so connectToPipeWithRetry can start racing the
+    // agent's own startup immediately, without waiting on the WS at all.
+    const { wss, port } = await startFakeRelay();
+    const pipeName = `xmp-e2e-${randomUUID()}`;
+    const path = pipePath(pipeName);
+    let child: ChildProcess | undefined;
+    let gameSocket: Socket | undefined;
+    try {
+      child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+        cwd: agentDir,
+        env: {
+          ...process.env,
+          XMP_SERVER: `ws://localhost:${port}`,
+          XMP_PIPE_NAME: pipeName,
+          XMP_SESSION: "e2e-session-early-pipe",
+          XMP_PLAYER_NAME: "e2e-tester-early-pipe",
+        },
+        stdio: "pipe",
+      });
+      child.on("error", (err) => {
+        throw err;
+      });
+
+      // Started BEFORE the pipe-connect attempt below (not awaited yet): wss's
+      // "connection" event is a one-shot emitter (once()), so attaching this
+      // listener only AFTER awaiting the pipe connect would risk missing an
+      // event that already fired while this test was busy retrying the pipe
+      // connection -- an earlier version of this test had exactly that bug
+      // (agent connects to the WS while the pipe retry loop is still running,
+      // the once() listener attached afterwards misses it, "agent never
+      // connected to fake relay" times out even though it plainly did).
+      const agentSocketPromise = waitForConnection(wss);
+
+      // Connect to the pipe as early as possible -- before even awaiting the WS
+      // connection -- so it is very likely already connected by the time
+      // onOpen's explicit-session branch runs and attempts its direct write.
+      gameSocket = await connectToPipeWithRetry(path);
+      const received = collectLines(gameSocket);
+
+      await agentSocketPromise; // confirms the agent's WS side did connect (and therefore did send its join)
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const joinLines = sessionLines(received.lines);
+      assert.equal(joinLines.length, 1, "exactly one session join must be looped back into the pipe");
+      const parsed = joinLines[0] as { action: string; sessionCode: string; playerName: string };
+      assert.equal(parsed.action, "join");
+      assert.equal(parsed.sessionCode, "e2e-session-early-pipe");
+      assert.equal(parsed.playerName, "e2e-tester-early-pipe");
+    } finally {
+      gameSocket?.destroy();
+      child?.kill();
+      wss.close();
+    }
+  }
 );

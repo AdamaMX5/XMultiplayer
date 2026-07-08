@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <mdscript name="XMP_Coop" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../libraries/md.xsd">
   <!--
-    XMultiplayer Coop: static sector mirror (Milestone C1, PlanMod.md Phase 2
-    "Coop im Universum des Hosts"). Everything in this file is PLAUSIBLE, not
-    VERIFIED, same status as XMP_Telemetry.xml/XMP_Arena.xml (A1-A5) - no X4
-    installation is available in this development environment. See
-    docs/C1-messprotokoll.md for the full assumption list.
+    XMultiplayer Coop (PlanMod.md Phase 2, "Coop im Universum des Hosts"):
+    Milestone C1 (static sector mirror) and, further below, Milestone C2
+    (host/guest ship mirroring, reusing Arena code as-is). Everything in this
+    file is PLAUSIBLE, not VERIFIED, same status as XMP_Telemetry.xml/
+    XMP_Arena.xml (A1-A5) - no X4 installation is available in this
+    development environment. See docs/C1-messprotokoll.md and
+    docs/C2-messprotokoll.md for the full assumption lists.
 
     SCOPE OF C1: when ANY session member's `session` `join` is received (by
     every OTHER member, via the existing dispatch this file plugs into -
@@ -112,15 +114,149 @@
         `player.sector` (without `.macro.name`) is itself a valid `sector`
         attribute value for `find_object`/`create_station`, not just readable
         for its macro name.
+
+    Milestone C2 ("Host-Schiff als dynamisches Objekt = Arena-Code
+    wiederverwendet"): mirrors each session member's own REAL ship to the
+    others, reusing XMP_Arena_HandleSpawn/HandleDespawn/HandleStateUpdate/
+    aiscripts/XMP.ProxyPilot.xml UNCHANGED - they already handle any `spawn`/
+    `despawn`/`state_update` generically regardless of what triggered it
+    (Arena-sector presence, or C2's own trigger below), and
+    XMP_Telemetry_Tick already streams `state_update` unconditionally
+    (player.entity.exists/isclass.ship only, no Arena/Coop gating anywhere in
+    that file) - so C2 needed ZERO changes to any of that reused code, only a
+    new trigger for the ONE piece Arena-presence used to provide: the initial
+    `spawn` announcing our own ship.
+
+    THE CORE PROBLEM C2 HAD TO SOLVE: unlike Arena (whose fixed sector-entry
+    trigger, XMP_Arena_OnEnterSector, unconditionally fires `session join` +
+    `spawn` together), Coop sessions are joined via the agent's explicit
+    "session" CLI flag/XMP_SESSION override (A5's "operator override" mechanism)
+    - that join is sent straight from the agent to the relay server over the
+    WebSocket and NEVER otherwise reaches MD, so nothing in this file could
+    previously know "I am now in an active session, announce my ship." Worse,
+    C1's own `session`-`join` dispatch branch (XMP_Coop_HandleSessionJoin)
+    only ever fires for a join RECEIVED from ANOTHER member (broadcast()
+    excludes the sender) - so relying on that alone would mean the FIRST
+    member to join a session (nobody there yet to receive their join) would
+    never announce their own ship at all, only whoever joins SECOND would (by
+    reacting to the first member's... except the first member's join was never
+    seen by anyone either, symmetric dead end both ways).
+
+    THE FIX (agent/src/index.ts, agent/src/sessionState.ts, not this file):
+    the agent now loops its own explicit-session join line back into the LOCAL
+    pipe (in addition to sending it to the relay as before), exactly once per
+    WS connection (`coopSelfAnnounceDeliveredToPipe`), covering both connection
+    orderings (game connects to the pipe before or after the WS join was sent)
+    via a combination of an immediate attempt in the WS `onOpen` handler and a
+    replay in the pipe's `onClientConnected` handler using
+    `SessionState.lastJoinLine()` (new). This is REAL, VERIFIED behavior
+    (agent/tests/relayToPipe.e2e.test.ts spawns the actual agent process end to
+    end and asserts the loopback happens exactly once, with the right
+    sessionCode/playerName, and does NOT repeat on a later pipe reconnect) -
+    unlike everything MD-side in this file, which stays PLAUSIBLE-only.
+
+    THIS FILE'S role, once that loopback exists: XMP_Coop_HandleSessionJoin
+    (extended from C1) now distinguishes OUR OWN join (playerName ==
+    player.name) from someone ELSE's. Someone else's join still only triggers
+    the C1 sector export - our own ship's spawn does not need re-sending on
+    every later join, since server/src/sessionManager.ts already replays any
+    currently-known spawn (regardless of origin) to a newly joined member, the
+    exact A2 mechanism Arena proxies have always relied on for the same
+    purpose. Our OWN join does NOT announce our ship immediately/synchronously
+    (an internal review round found and fixed a real bug in that first
+    design, see XMP_Coop_HandleSessionJoin's own comment below for the full
+    story) - it only marks $XMP.CoopPendingSelfAnnounce; a separate
+    once-a-second poll (XMP_Coop_SelfAnnounceCheck) actually announces once
+    the player's ship exists, decoupling "our join arrived" from "our ship is
+    ready to describe," which are not guaranteed to become true at the same
+    moment.
+
+    DELIBERATELY NOT ATTEMPTED IN C2 (same "document, don't solve everything"
+    posture as C1's own list above):
+      - No explicit "leave Coop" despawn path while staying connected. A
+        genuine WebSocket disconnect already despawns everything that client
+        owned via the existing, fully generic A2-A5 disconnect handling
+        (server.ts's handleDisconnect/broadcastDespawns, never Arena- or
+        Coop-specific) - but there is no way to leave a Coop session
+        deliberately without disconnecting the agent entirely, unlike Arena's
+        sector-exit-triggered XMP_Arena_OnExitSector. Revisit alongside C5
+        ("Sektorwechsel") if that turns out to matter in practice.
+      - Combat between mirrored player ships is untouched/unconsidered: a
+        Coop-announced ship proxy is invulnerable exactly like an Arena proxy
+        (XMP_Arena_HandleSpawn's existing set_object_invulnerable, reused
+        as-is), and hit-reporting/hp_state flow identically - meaning two
+        Coop players COULD currently damage each other's mirrored ships via
+        the exact same hit_report/hp_state path Arena PvP uses, since nothing
+        in the protocol or server distinguishes "Arena combat" from "Coop
+        session" (there is no such distinction anywhere, same as the
+        host/guest non-distinction from C1). Whether that is desired for Coop
+        is a product decision PlanMod.md does not explicitly make either way;
+        noted here rather than silently assumed.
   -->
   <cues>
+    <!--
+      C2 init: resets both the self-announce guard AND the pending flag
+      whenever the Named Pipes API (re)initializes, mirroring
+      XMP_Arena_TuningDefaults/PresenceLoop's own reset-on-Reloaded pattern
+      (A5). NOTE (correction after an internal review round on the first C2
+      draft): agent/src/index.ts's own delivery flag
+      (coopSelfAnnounceDeliveredToPipe) is deliberately ONE-SHOT for the
+      lifetime of a single WebSocket connection, NOT reset on a pipe
+      reconnect - an earlier version of this comment claimed otherwise. What
+      DOES need to survive/react to a pipe reconnect is $XMP.CoopSelfAnnounced
+      itself (a fresh MD session after a game restart has announced nothing
+      yet, regardless of what the agent's own JS-side bookkeeping thinks it
+      already delivered once, in a possibly earlier game session).
+    -->
+    <cue name="XMP_Coop_Init" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.CoopSelfAnnounced" exact="false" />
+          <set_value name="$XMP.CoopPendingSelfAnnounce" exact="false" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Coop_SelfAnnounceCheck" />
+      </cues>
+    </cue>
+
     <!--
       Dispatched from XMP_Arena_Dispatch (mod/md/XMP_Arena.xml) whenever a
       `session` message of ANY action is received - mirrors how that same
       dispatch branch already also feeds XMP_Arena_HandleSetaStatus, which
       independently no-ops for actions it doesn't care about. Only "join"
-      triggers an export; every other action (leave/ready/countdown/seta_on/
-      seta_off) is silently ignored here.
+      is acted on; every other action (leave/ready/countdown/seta_on/seta_off)
+      is silently ignored here.
+
+      C2 extends this beyond C1's sector export with a SELF/OTHER distinction,
+      keyed on the join's playerName versus our own player.name:
+        - OUR OWN join, echoed back into the pipe by the agent (C2,
+          agent/src/index.ts - an explicit-session join normally goes straight
+          from the agent to the relay over the WebSocket and never otherwise
+          reaches MD at all): marks $XMP.CoopPendingSelfAnnounce, picked up by
+          XMP_Coop_SelfAnnounceCheck below.
+
+          DELIBERATELY does NOT also require player.entity.exists here (fixed
+          during an internal review round: the first draft required it in
+          THIS condition, which meant a self-join arriving before the
+          player's ship exists yet - e.g. still loading a save, exactly the
+          same transient condition XMP_Telemetry_BuildAndSend already guards
+          against - fell through to the ELSE branch below and wrongly ran
+          XMP_Coop_ExportSector instead, then never got another chance to
+          announce for the rest of the session, since the agent's own
+          delivery is one-shot, see XMP_Coop_Init's comment above). Splitting
+          "did our own join arrive" (checked here, unconditionally) from "is
+          the player's ship ready to announce" (checked by the poll loop
+          below, retried every second until true) is what fixes that.
+        - Someone ELSE'S join (the only case C1 handled): export our sector
+          (XMP_Coop_ExportSector, unchanged from C1). Our own ship spawn does
+          NOT need re-sending here - server/src/sessionManager.ts already
+          replays every currently-known spawn (regardless of how it originally
+          arrived) to any newly joined member, the same A2 mechanism Arena
+          proxies have always relied on.
     -->
     <cue name="XMP_Coop_HandleSessionJoin" instantiate="false">
       <actions>
@@ -131,10 +267,86 @@
 
           <do_if value="$XMP.CoopRxAction == 'join'">
             <do_all>
-              <debug_text text="'[XMultiplayer][Coop] a session member joined, exporting our current sector'" filter="general" />
-              <include_interrupt_actions ref="XMP_Coop_ExportSector" />
+              <set_value name="$XMP.ExtractKey" exact="'playerName'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopRxPlayerName" exact="$XMP.ExtractValue" />
+
+              <do_if value="$XMP.CoopRxPlayerName == player.name">
+                <do_all>
+                  <debug_text text="'[XMultiplayer][Coop] our own join reached the pipe, will announce our ship once ready'" filter="general" />
+                  <set_value name="$XMP.CoopPendingSelfAnnounce" exact="true" />
+                </do_all>
+                <else>
+                  <do_all>
+                    <debug_text text="'[XMultiplayer][Coop] a session member joined, exporting our current sector'" filter="general" />
+                    <include_interrupt_actions ref="XMP_Coop_ExportSector" />
+                  </do_all>
+                </else>
+              </do_if>
             </do_all>
           </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      C2: polls once a second (same cadence rationale as
+      XMP_Arena_PresenceLoop/SetaCheck - this is a rare, one-time-per-session
+      event, no need for telemetry-rate polling) for the condition
+      XMP_Coop_HandleSessionJoin above can only PARTIALLY establish by itself:
+      our own join has arrived AND the player's ship now actually exists.
+      Whichever of the two becomes true last is what actually triggers the
+      announce, on whichever poll tick notices both are satisfied.
+    -->
+    <cue name="XMP_Coop_SelfAnnounceCheck" instantiate="true">
+      <delay exact="1s" />
+      <actions>
+        <do_if value="$XMP.CoopPendingSelfAnnounce and not $XMP.CoopSelfAnnounced and player.entity.exists">
+          <do_all>
+            <debug_text text="'[XMultiplayer][Coop] player ship ready, announcing our ship now'" filter="general" />
+            <include_interrupt_actions ref="XMP_Coop_AnnounceOwnShip" />
+            <set_value name="$XMP.CoopSelfAnnounced" exact="true" />
+            <set_value name="$XMP.CoopPendingSelfAnnounce" exact="false" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Coop_SelfAnnounceCheck_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      C2 "Host-Schiff als dynamisches Objekt": announces our own REAL ship the
+      same way XMP_Arena_OnEnterSector does for Arena-sector presence (same
+      field construction, same assumed accessors - player.entity.id/
+      macro.name/hullmax/shieldmax, no new risk introduced here), but
+      triggered by our own join reaching the pipe (see
+      XMP_Coop_HandleSessionJoin above) instead of Arena-sector entry. Once
+      sent, this exact `spawn` is what makes XMP_Arena_HandleSpawn (reused
+      as-is, unchanged since A2/A3/A4) build a Dead-Reckoning-driven,
+      server-authoritative-HP proxy of our ship on every OTHER session
+      member's side - literally the "Arena-Code wiederverwendet" PlanMod.md
+      calls for.
+    -->
+    <cue name="XMP_Coop_AnnounceOwnShip" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;spawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;objectId&quot;:&quot;' + player.entity.id + '&quot;'
+              + ',&quot;shipType&quot;:&quot;' + player.entity.macro.name + '&quot;'
+              + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
+              + ',&quot;maxHull&quot;:' + player.entity.hullmax
+              + ',&quot;maxShield&quot;:' + player.entity.shieldmax
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
         </do_all>
       </actions>
     </cue>

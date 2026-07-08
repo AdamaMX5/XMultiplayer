@@ -49,4 +49,21 @@ export class SessionState {
     if (this.ownSpawnLine) lines.push(this.ownSpawnLine);
     return lines;
   }
+
+  /**
+   * The last outbound `session` `join` line, if any (C2 "Coop" self-announce,
+   * agent/src/index.ts's pipe `onClientConnected` handler): an explicit-session
+   * join is sent straight to the relay over the WebSocket and never otherwise
+   * touches the pipe, so MD has no way to know it happened -- replaying this
+   * line into the pipe whenever the LOCAL game (re)connects is what lets
+   * mod/md/XMP_Coop.xml's XMP_Coop_HandleSessionJoin recognize "this is my own
+   * join" (playerName == player.name) and announce its own ship the same way
+   * XMP_Arena_OnEnterSector does for Arena-sector presence. Distinct from
+   * resendLines(), which is for the WS reconnect case (server-side) -- this is
+   * for the PIPE (re)connect case (local game-side), and the two can happen
+   * independently of each other.
+   */
+  lastJoinLine(): string | undefined {
+    return this.joinLine;
+  }
 }

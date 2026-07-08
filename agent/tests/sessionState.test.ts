@@ -76,6 +76,36 @@ test("a respawn (same or different objectId) overwrites the remembered spawn lin
   assert.deepEqual(state.resendLines(), ["JOIN_LINE", "SPAWN_NEW"]);
 });
 
+// --- C2 "Coop" self-announce: lastJoinLine() ---
+
+test("lastJoinLine() is undefined before any join has been observed", () => {
+  const state = new SessionState();
+  assert.equal(state.lastJoinLine(), undefined);
+});
+
+test("lastJoinLine() returns the most recently observed join line", () => {
+  const state = new SessionState();
+  state.observeOutbound(joinMsg("coop-1"), "JOIN_A");
+  assert.equal(state.lastJoinLine(), "JOIN_A");
+  state.observeOutbound(joinMsg("coop-2"), "JOIN_B");
+  assert.equal(state.lastJoinLine(), "JOIN_B");
+});
+
+test("lastJoinLine() is undefined again after a leave", () => {
+  const state = new SessionState();
+  state.observeOutbound(joinMsg("coop-1"), "JOIN_LINE");
+  state.observeOutbound(leaveMsg("coop-1"), "LEAVE_LINE");
+  assert.equal(state.lastJoinLine(), undefined);
+});
+
+test("lastJoinLine() is unaffected by an unrelated spawn/despawn", () => {
+  const state = new SessionState();
+  state.observeOutbound(joinMsg("coop-1"), "JOIN_LINE");
+  state.observeOutbound(spawnMsg("ship-1"), "SPAWN_LINE");
+  state.observeOutbound(despawnMsg("ship-1"), "DESPAWN_LINE");
+  assert.equal(state.lastJoinLine(), "JOIN_LINE");
+});
+
 test("unrelated message types (state_update, chat, hit_report) do not affect the remembered state", () => {
   const state = new SessionState();
   state.observeOutbound(joinMsg("arena-1"), "JOIN_LINE");

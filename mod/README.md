@@ -94,9 +94,28 @@ first milestone needing to enumerate a COLLECTION of sector objects (rather
 than read the player's own ship or a single scalar), for which no prior
 pattern existed anywhere in this codebase.
 
+Milestone C2 (PlanMod.md Phase 2, "Host-Schiff als dynamisches Objekt =
+Arena-Code wiederverwendet", `docs/C2-messprotokoll.md`): mirrors each session
+member's own real ship to the others, reusing `XMP_Arena_HandleSpawn`/
+`HandleDespawn`/`HandleStateUpdate`/`aiscripts/XMP.ProxyPilot.xml` completely
+unchanged -- they already handle any `spawn`/`despawn`/`state_update`
+generically regardless of what triggered it, and `XMP_Telemetry_Tick` already
+streams unconditionally. The one genuinely new piece: Coop sessions are joined
+via the agent's explicit `session` CLI flag/`XMP_SESSION` override (A5), a
+join that goes straight to the relay server over WebSocket and never
+otherwise reaches MD -- so `agent/src/index.ts` now loops that join back into
+the local pipe too (covering both connection orderings, game-before-agent and
+agent-before-game, exactly once per WebSocket connection), and
+`XMP_Coop_HandleSessionJoin` (`md/XMP_Coop.xml`) now tells its own looped-back
+join apart from a real remote one (`playerName == player.name`) to announce
+its own ship exactly once. This loopback is the one part of C2 that IS
+end-to-end VERIFIED, not just PLAUSIBLE (`agent/tests/relayToPipe.e2e.test.ts`
+spawns the real agent process and observes it over a real pipe/WebSocket).
+
 **Status: PLAUSIBLE, not VERIFIED (mod side); the server/agent-side logic IS
 VERIFIED** (real `node:test` tests throughout `server/tests/` and
-`agent/tests/`). This extension has not been loaded or run inside X4 (no game
+`agent/tests/`, including a real spawned-process end-to-end test for the C2
+join loopback). This extension has not been loaded or run inside X4 (no game
 installation available in this development environment). The XML is checked to
 be syntactically valid, but the Mission Director/AI-script semantics (cue
 timing, the exact SirNukes Named_Pipes API surface, whether MD can parse a
@@ -104,13 +123,15 @@ received JSON string at all, the `<aiscript>` root shape, `move.to.position`, an
 `object.blackboard` as the MD/AI-script data channel from A3, whether
 `event_object_attacked`/`event_object_fired` exist as assumed (A4), whether
 `player.sector`/`player.entity.hullmax`/`player.timewarp` exist as assumed
-(A5), and now -- C1 -- whether a `find_object`-style sector enumeration and
-`create_station`-style placeholder placement exist as assumed) are assumptions
-documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
+(A5), whether a `find_object`-style sector enumeration and `create_station`-style
+placeholder placement exist as assumed (C1), and now -- C2 -- whether
+`XMP_Coop_HandleSessionJoin`'s `playerName == player.name` self-detection
+actually distinguishes a looped-back own join from a real remote one the way
+assumed) are assumptions documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
 `md/XMP_Coop.xml`/`aiscripts/XMP.ProxyPilot.xml` and in
-`docs/A1-messprotokoll.md` through `docs/C1-messprotokoll.md`. In-game
-validation is the first open task for all six milestones; A2's JSON-parsing
-assumption must be validated before A3-C1 can be tested at all (no
+`docs/A1-messprotokoll.md` through `docs/C2-messprotokoll.md`. In-game
+validation is the first open task for all seven milestones; A2's JSON-parsing
+assumption must be validated before A3-C2 can be tested at all (no
 state_update/hit_report/hp_state/session/sector_object data reaches the
 blackboard or the player's own ship otherwise).
 
