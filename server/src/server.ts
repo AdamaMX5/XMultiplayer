@@ -7,6 +7,7 @@ import {
   isPlausibleVelocity,
   isWithinArenaBounds,
   MAX_MESSAGE_BYTES,
+  MAX_NPC_SPAWNS_PER_CLIENT,
   MAX_SECTOR_OBJECTS_PER_MIRROR,
   parseMessage,
   sanitizeChatText,
@@ -265,21 +266,73 @@ function handleMessage(
   }
 
   if (msg.type === "spawn") {
-    // A5: the server had never validated shipType at all before this -- the macro
-    // whitelist only ever ran agent-side (decideRelay, for INCOMING spawns from
-    // the relay), which a client connecting directly to the WebSocket instead of
-    // through the agent would simply bypass. Checked here too now, plus the new
-    // ship-class rule preset on top of it.
-    if (!isKnownShipMacro(msg.shipType)) {
-      console.warn(`[server] dropped spawn from ${clientId}: unknown shipType "${msg.shipType}"`);
-      return;
-    }
-    if (!isShipClassAllowed(msg.shipType, shipClassPreset)) {
-      console.warn(`[server] dropped spawn from ${clientId}: shipType "${msg.shipType}" not allowed under ship class preset "${shipClassPreset}"`);
-      return;
-    }
-    if (sessions.hasOtherActiveSpawn(clientId, msg.objectId)) {
-      console.warn(`[server] dropped spawn from ${clientId}: spawn cap exceeded (already has a different active spawn)`);
+    // C3: "npc" spawns are a fundamentally different kind of thing from a
+    // player's own ship (SpawnMessage.category's own doc comment,
+    // protocol/src/messages.ts) and get their own, separate validation below
+    // instead of the two checks in this block that only make sense for a
+    // player's Arena starting ship: SHIP_MACRO_WHITELIST is a small,
+    // hand-picked set of Arena PvP ships, never meant to cover real NPC
+    // traffic. shipClassPreset (S/M-only Arena rule presets, meant to keep a
+    // PLAYER-piloted PvP match fair) is a DELIBERATE skip too, not an
+    // oversight (security review question, C3): an "npc" spawn can never be
+    // piloted by a player or fire on its own initiative (no local input, no
+    // fire_event unless someone else's client sends one under its own
+    // sourceId ownership), and is invulnerable exactly like every other
+    // proxy (XMP_Arena_HandleSpawn's set_object_invulnerable, unchanged) --
+    // it has no path to actually PLAY as an oversized ship the class preset
+    // would otherwise have blocked, only to exist as an inert, visible prop
+    // shaped like one. See docs/C3-messprotokoll.md for the fuller
+    // reasoning and the follow-up items this still leaves open (a global
+    // per-session NPC cap, and clientId-scoped budgets being multipliable
+    // across several connections from the same operator -- both pre-existing
+    // classes of gap, not introduced by C3, just made more visible by it).
+    const category = msg.category ?? "player";
+    if (category === "player") {
+      // A5: the server had never validated shipType at all before this -- the macro
+      // whitelist only ever ran agent-side (decideRelay, for INCOMING spawns from
+      // the relay), which a client connecting directly to the WebSocket instead of
+      // through the agent would simply bypass. Checked here too now, plus the new
+      // ship-class rule preset on top of it.
+      if (!isKnownShipMacro(msg.shipType)) {
+        console.warn(`[server] dropped spawn from ${clientId}: unknown shipType "${msg.shipType}"`);
+        return;
+      }
+      if (!isShipClassAllowed(msg.shipType, shipClassPreset)) {
+        console.warn(`[server] dropped spawn from ${clientId}: shipType "${msg.shipType}" not allowed under ship class preset "${shipClassPreset}"`);
+        return;
+      }
+      // A4 spawn cap: one active PLAYER spawn per member. Does not apply to
+      // "npc" spawns at all (checked in the else branch below instead) -- a
+      // client legitimately owns its own ship spawn AND up to
+      // MAX_NPC_SPAWNS_PER_CLIENT NPC spawns simultaneously, two independent
+      // budgets, not one shared one.
+      if (sessions.hasOtherActiveSpawn(clientId, msg.objectId)) {
+        console.warn(`[server] dropped spawn from ${clientId}: spawn cap exceeded (already has a different active spawn)`);
+        return;
+      }
+    } else if (category === "npc") {
+      // C3 NPC budget (PlanMod.md "Budget definieren: max. Proxy-Anzahl").
+      // The ownerOf() exception below does NOT let a still-active NPC
+      // re-spawn past the cap (the respawn-gate a few lines down rejects
+      // that unconditionally, for both categories, with a more specific
+      // "still active" message) -- its only actual effect is which of the
+      // two rejection reasons a client sees when BOTH would apply (at cap
+      // AND re-spawning something already owned): this branch steps aside
+      // so the respawn-gate's more accurate message wins instead of this
+      // one's generic "cap reached".
+      if (sessions.npcSpawnCount(clientId) >= MAX_NPC_SPAWNS_PER_CLIENT && sessions.ownerOf(msg.objectId) !== clientId) {
+        console.warn(`[server] dropped npc spawn from ${clientId}: MAX_NPC_SPAWNS_PER_CLIENT (${MAX_NPC_SPAWNS_PER_CLIENT}) reached`);
+        return;
+      }
+    } else {
+      // Defense in depth, not currently reachable: parseMessage only ever
+      // accepts "player"/"npc"/absent for category (protocol/src/parse.ts).
+      // Fails CLOSED rather than silently taking the less-restricted "npc"
+      // path if that enum is ever widened without updating this switch --
+      // security review finding, C3: an earlier draft used a blanket `else`
+      // here, which would have (harmlessly today, but fragile) treated any
+      // FUTURE category value as "npc" by default.
+      console.warn(`[server] dropped spawn from ${clientId}: unrecognized category "${String(msg.category)}"`);
       return;
     }
     const existingOwner = sessions.ownerOf(msg.objectId);
@@ -304,7 +357,7 @@ function handleMessage(
       console.warn(`[server] dropped spawn from ${clientId}: objectId "${msg.objectId}" is still active, must be destroyed/despawned before respawning`);
       return;
     }
-    sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw);
+    sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw, category);
     // maxHull/maxShield (A4): sender-supplied starting HP, falling back to the
     // fixed defaults when absent OR out of range -- untrusted client input, same
     // trust-boundary rationale as hit_report.damage (isValidDamageClaim/

@@ -192,6 +192,58 @@
         host/guest non-distinction from C1). Whether that is desired for Coop
         is a product decision PlanMod.md does not explicitly make either way;
         noted here rather than silently assumed.
+
+    Milestone C3 ("NPC-Bubble mit Interest Management"): XMP_Coop_BubbleCheck
+    below periodically exports NPC ships near our own position as ordinary
+    `spawn`/`state_update`/`despawn` messages (category="npc", C3's one
+    protocol addition, protocol/src/messages.ts's SpawnMessage.category) -
+    reusing XMP_Arena_HandleSpawn/HandleDespawn/HandleStateUpdate/
+    aiscripts/XMP.ProxyPilot.xml COMPLETELY UNCHANGED, the same "Arena-Code
+    wiederverwendet" principle C2 already established for player ships. See
+    XMP_Coop_BubbleCheck's own comment for the detailed design and its
+    assumptions (the single riskiest MD code in this file after C1's
+    XMP_Coop_FindObjectsOfClass) and docs/C3-messprotokoll.md for the
+    protocol/server/agent-side changes this milestone needed (a client's A4
+    one-active-spawn cap now applies ONLY to category="player"; a SEPARATE,
+    independent MAX_NPC_SPAWNS_PER_CLIENT budget applies to category="npc";
+    SHIP_MACRO_WHITELIST is skipped entirely for "npc" spawns, since it was
+    never meant to cover real NPC ship diversity).
+
+    DELIBERATELY NOT ATTEMPTED IN C3 (same posture as C1/C2's own lists
+    above):
+      - Bubble center is OUR OWN ship's position, not "the other session
+        member's position" as PlanMod.md's prose literally says ("Host
+        exportiert NPC-Schiffe im Radius um den GAST"). In the common
+        2-player "flying together" scenario these converge to nearly the
+        same result; the alternative (centering on every OTHER member's own
+        mirrored proxy position) would need a currently-nonexistent
+        "enumerate all current session members" mechanism in MD (only a
+        by-name lookup table exists, $XMP.ProxyObjectIdByOwner, A5) to
+        generalize past exactly 2 players. Revisit once real multi-member
+        Coop sessions (3+) are a target, or once C5 ("Sektorwechsel")'s own
+        "Host und Gast in verschiedenen Sektoren" edge case forces the
+        question anyway (PlanMod.md already flags that as an open decision
+        point "nach C3-Performance-Daten").
+      - Single-tier update rate for every tracked NPC (2s, tunable), not
+        PlanMod's literal "volle Update-Rate für nahe, seltener für ferne"
+        two-tier design - see XMP_Coop_BubbleTuningDefaults's own comment.
+      - No real macro whitelist for NPC shipType (same posture as C1's
+        station/gate/asteroid/region macro names) - length-capped
+        (MAX_MACRO_NAME_LENGTH, applies to EVERY spawn.shipType since C3,
+        protocol/src/parse.ts) and sanitized before reaching the pipe
+        (agent/src/pipeSanitize.ts), but not whitelisted.
+      - No explicit hit-relay/kill-attribution design for NPCs - PlanMod.md
+        scopes that to C4 ("Hit-Relay auf NPCs") explicitly. Because NPC
+        proxies reuse XMP_Arena_HandleSpawn as-is, they already inherit A4's
+        UNSCOPED, universe-wide event_object_attacked hook
+        (XMP_Arena_OnProxyAttacked) - meaning hit_report/hp_state/
+        destruction ALREADY technically flow for an NPC proxy today, as an
+        emergent side effect of reuse, not a deliberate C3 feature. The one
+        known rough edge: the kill-feed (server.ts's broadcastKillFeed)
+        would attribute an NPC's destruction to the EXPORTING player's own
+        name ("Alice destroyed <NPC's real name, if any>"), since spawn.owner
+        is that player's clientId for NPCs the same as for their own ship -
+        accepted for V1, proper NPC-specific naming/attribution is C4's job.
   -->
   <cues>
     <!--
@@ -569,6 +621,212 @@
           </do_if>
         </do_all>
       </actions>
+    </cue>
+
+    <!--
+      C3 "NPC-Bubble mit Interest Management": tuning constants, gathered here
+      exactly like XMP_Arena_TuningDefaults (A3). All four are PLACEHOLDER
+      values, not measured (PlanMod.md explicitly calls for real performance
+      measurement before finalizing this milestone's numbers - "Budget
+      definieren... Performance-Messung!" - which needs an X4 installation
+      this development environment does not have):
+        - CoopBubbleRadius: 20000 (20km). Arbitrary "nearby traffic" guess.
+        - CoopBubbleMaxObjects: 10, matching MAX_NPC_SPAWNS_PER_CLIENT
+          (protocol/src/limits.ts) EXACTLY on purpose - if this ever drifts
+          out of sync, the server would silently reject NPC spawns beyond its
+          own cap after MD already did the work of finding and building them,
+          wasted effort for no gain. Also matches PlanMod's own "~10
+          nächsten/relevantesten Objekte" number.
+        - CoopBubbleTickIntervalSec: 2. ONE unified rate for every tracked
+          NPC, not PlanMod's literal two-tier "volle Rate für nahe, seltener
+          für ferne" design - deliberate V1 simplification (see this file's
+          "DELIBERATELY NOT ATTEMPTED IN C3" note in the header). The nearest-
+          N cutoff (CoopBubbleMaxObjects, combined with find_object's assumed
+          distance-sorted results) already captures "relevanteste Objekte"
+          without needing a second, slower tier - Dead Reckoning (A3) is
+          exactly the mechanism meant to paper over a coarser update cadence
+          than the player's own 10Hz telemetry via extrapolation, and this
+          rate is well inside what its existing tuning already tolerates
+          (compare $XMP.DeadReckoningUpdateTimeoutSec = 5s, XMP_Arena.xml).
+        - CoopBubbleStaleTimeoutSec: 5 (2.5x the tick interval, same slack
+          rationale as the Dead Reckoning update timeout it happens to match).
+    -->
+    <cue name="XMP_Coop_BubbleTuningDefaults" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.CoopBubbleRadius" exact="20000" />
+          <set_value name="$XMP.CoopBubbleMaxObjects" exact="10" />
+          <set_value name="$XMP.CoopBubbleTickIntervalSec" exact="2" />
+          <set_value name="$XMP.CoopBubbleStaleTimeoutSec" exact="5" />
+          <set_value name="$XMP.CoopBubbleKnownIds" exact="[]" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Coop_BubbleCheck" />
+      </cues>
+    </cue>
+
+    <!--
+      C3 main loop. THE SECOND HIGHEST-RISK ITEM IN THIS FILE, after
+      XMP_Coop_FindObjectsOfClass (C1): extends the ALREADY-assumed
+      `find_object` action (C1: `class`/`sector`/`multiple`) with THREE
+      further assumed attributes it has never needed before -
+      `position`/`maxdist` (a radius filter around a reference point) and
+      `sortbydistanceto` (pre-sorted, nearest-first results) - plus a NEW
+      assumed `class` value, `'ship'`, alongside C1's `'station'`/`'gate'`/
+      `'asteroid'`/`'region'`. If any of these three new attributes don't
+      exist as assumed, the fallback is the same as C1's: a more specific
+      per-purpose action (e.g. a `find_ship`-style action with its own
+      distance/sort parameters, per various community MD references) - only
+      this one cue's `find_object` call would need to change.
+
+      Bubble center is OUR OWN ship's position, not the other session
+      member's (a deliberate C2-consistent simplification - see this file's
+      "DELIBERATELY NOT ATTEMPTED IN C3" header note for the full reasoning).
+
+      Excludes (a) our own ship and (b) anything already tracked as a proxy
+      of another session member ($XMP.ProxyWireIdByGameId, populated by
+      XMP_Arena_HandleSpawn, A2) - without (b), a remote player's OWN proxy
+      ship (a real local game object on THIS client, invulnerable and
+      AI-piloted, but real nonetheless) would get re-exported as if it were
+      an NPC, which the receiving side (that SAME remote player, or a third
+      member) would then mirror as a proxy-of-a-proxy: nonsensical, and for
+      the remote player themselves, a proxy of their OWN ship.
+
+      Budget enforcement is MANUAL (a plain counter compared each iteration),
+      not a further assumed `find_object` parameter (e.g. a hypothetical
+      `resultmaxcount`) - deliberately, to avoid stacking a FOURTH new
+      engine-side assumption on top of the three above for something a
+      simple do_all/counter comparison (an already-used, low-risk pattern)
+      achieves just as well.
+
+      The spawn/state_update/despawn JSON string-building below duplicates
+      the same pattern already written out in XMP_Arena_OnEnterSector/
+      XMP_Telemetry_BuildAndSend/XMP_Coop_ExportSector rather than sharing it
+      - not an oversight, MD's `include_interrupt_actions` has no confirmed
+      way to pass parameters into a shared cue and read a return value back
+      out (unlike XMP_Arena_ExtractField, which is shared successfully
+      because it only needs $XMP.-namespaced globals in and out, no return
+      value), so each JSON-building site stays its own literal block.
+
+      Lifecycle (spawn/despawn on bubble entry/exit) uses a "last seen
+      timestamp + timeout" design, not a "seen this tick: yes/no" flag reset
+      every tick - MD has no confirmed way to bulk-clear a keyed table
+      ($XMP.CoopBubbleKnown.{id} for every previously-known id) each tick, so
+      resetting per-tick "seen" flags cleanly is not obviously possible.
+      Reusing a timestamp instead sidesteps that entirely (nothing needs
+      clearing, staleness is just "how long since this was last refreshed",
+      the exact same idiom aiscripts/XMP.ProxyPilot.xml's Dead Reckoning
+      already uses for its own update timeout) - newly-found objects refresh
+      their own timestamp and get appended into $XMP.CoopBubbleKnownIds
+      (a plain list, C1's already-used "build fresh, don't mutate in place"
+      idiom) during the SAME pass that later reads that same list for
+      despawn detection; this is safe (not a stale-read race) specifically
+      BECAUSE staleness is timestamp-based, not iteration-order-based - a
+      just-appended entry's timestamp is always "now", so it always reads as
+      fresh regardless of when in this tick it was appended relative to the
+      despawn pass.
+    -->
+    <cue name="XMP_Coop_BubbleCheck" instantiate="true">
+      <delay exact="$XMP.CoopBubbleTickIntervalSec" />
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship">
+          <do_all>
+            <find_object name="$XMP.CoopBubbleFound" class="'ship'" sector="player.sector"
+              position="player.entity.position" maxdist="$XMP.CoopBubbleRadius"
+              sortbydistanceto="player.entity.position" multiple="true" />
+
+            <set_value name="$XMP.CoopBubbleTrackedCount" exact="0" />
+            <do_all exact="$XMP.CoopBubbleFound" counter="$XMP.CoopBubbleFindIndex">
+              <set_value name="$XMP.CoopBubbleEntry" exact="$XMP.CoopBubbleFindIndex.entry" />
+              <do_if value="$XMP.CoopBubbleTrackedCount &lt; $XMP.CoopBubbleMaxObjects
+                  and $XMP.CoopBubbleEntry.id != player.entity.id
+                  and not $XMP.ProxyWireIdByGameId.{$XMP.CoopBubbleEntry.id}.exists">
+                <do_all>
+                  <set_value name="$XMP.CoopBubbleTrackedCount" exact="$XMP.CoopBubbleTrackedCount + 1" />
+                  <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopBubbleEntry.id}" exact="player.age" />
+
+                  <do_if value="not $XMP.CoopBubbleKnown.{$XMP.CoopBubbleEntry.id}.exists">
+                    <do_all>
+                      <append_to_list name="$XMP.CoopBubbleKnownIds" exact="$XMP.CoopBubbleEntry.id" />
+                      <set_value name="$XMP.CoopBubbleKnown.{$XMP.CoopBubbleEntry.id}" exact="true" />
+                      <set_value name="$XMP.Json"
+                        exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;spawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                          + ',&quot;objectId&quot;:&quot;' + $XMP.CoopBubbleEntry.id + '&quot;'
+                          + ',&quot;shipType&quot;:&quot;' + $XMP.CoopBubbleEntry.macro.name + '&quot;'
+                          + ',&quot;owner&quot;:&quot;' + player.name + '&quot;'
+                          + ',&quot;maxHull&quot;:' + $XMP.CoopBubbleEntry.hullmax
+                          + ',&quot;maxShield&quot;:' + $XMP.CoopBubbleEntry.shieldmax
+                          + ',&quot;category&quot;:&quot;npc&quot;'
+                          + '}'" />
+                      <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+                      <debug_text text="'[XMultiplayer][Coop] npc entered bubble: ' + $XMP.CoopBubbleEntry.macro.name + ' (objectId=' + $XMP.CoopBubbleEntry.id + ')'" filter="general" />
+                    </do_all>
+                    <else>
+                      <do_all>
+                        <set_value name="$XMP.Json"
+                          exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;state_update&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                            + ',&quot;shipId&quot;:&quot;' + $XMP.CoopBubbleEntry.id + '&quot;'
+                            + ',&quot;position&quot;:{&quot;x&quot;:' + $XMP.CoopBubbleEntry.position.x + ',&quot;y&quot;:' + $XMP.CoopBubbleEntry.position.y + ',&quot;z&quot;:' + $XMP.CoopBubbleEntry.position.z + '}'
+                            + ',&quot;rotation&quot;:{&quot;qx&quot;:' + $XMP.CoopBubbleEntry.quaternion.x + ',&quot;qy&quot;:' + $XMP.CoopBubbleEntry.quaternion.y + ',&quot;qz&quot;:' + $XMP.CoopBubbleEntry.quaternion.z + ',&quot;qw&quot;:' + $XMP.CoopBubbleEntry.quaternion.w + '}'
+                            + ',&quot;velocity&quot;:{&quot;x&quot;:' + $XMP.CoopBubbleEntry.speed.x + ',&quot;y&quot;:' + $XMP.CoopBubbleEntry.speed.y + ',&quot;z&quot;:' + $XMP.CoopBubbleEntry.speed.z + '}'
+                            + '}'" />
+                        <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+                      </do_all>
+                    </else>
+                  </do_if>
+                </do_all>
+              </do_if>
+            </do_all>
+
+            <!-- Despawn pass: anything in the PREVIOUS tick's known-ids list
+                 not refreshed above (either genuinely gone, out of radius, or
+                 budget-bumped by something now closer) is stale and gets
+                 despawned; survivors are rebuilt into a fresh list, the same
+                 "rebuild, don't mutate in place" idiom as
+                 XMP_Coop_ExportSector's $XMP.CoopExportObjects (C1). -->
+            <set_value name="$XMP.CoopBubbleSurvivingIds" exact="[]" />
+            <do_all exact="$XMP.CoopBubbleKnownIds" counter="$XMP.CoopBubbleDespawnIndex">
+              <set_value name="$XMP.CoopBubbleCheckId" exact="$XMP.CoopBubbleDespawnIndex.entry" />
+              <do_if value="player.age - $XMP.CoopBubbleLastSeenAt.{$XMP.CoopBubbleCheckId} &gt; $XMP.CoopBubbleStaleTimeoutSec">
+                <do_all>
+                  <set_value name="$XMP.Json"
+                    exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;despawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                      + ',&quot;objectId&quot;:&quot;' + $XMP.CoopBubbleCheckId + '&quot;'
+                      + ',&quot;reason&quot;:&quot;left_bubble&quot;'
+                      + '}'" />
+                  <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+                  <set_value name="$XMP.CoopBubbleKnown.{$XMP.CoopBubbleCheckId}" exact="null" />
+                  <!-- Review-round fix: an earlier draft cleared CoopBubbleKnown
+                       here but left CoopBubbleLastSeenAt.{id} behind forever,
+                       an unbounded (if functionally harmless - overwritten on
+                       re-entry) growth of that table over a play session.
+                       Cleared here too now, symmetrically. -->
+                  <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopBubbleCheckId}" exact="null" />
+                  <debug_text text="'[XMultiplayer][Coop] npc left bubble: objectId=' + $XMP.CoopBubbleCheckId" filter="general" />
+                </do_all>
+                <else>
+                  <append_to_list name="$XMP.CoopBubbleSurvivingIds" exact="$XMP.CoopBubbleCheckId" />
+                </else>
+              </do_if>
+            </do_all>
+            <set_value name="$XMP.CoopBubbleKnownIds" exact="$XMP.CoopBubbleSurvivingIds" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Coop_BubbleCheck_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
     </cue>
   </cues>
 </mdscript>

@@ -57,6 +57,7 @@ test("roundtrip parse -> serialize -> parse is stable for every message type", (
       loadout: ["a", "b"],
       maxHull: 120,
       maxShield: 80,
+      category: "player",
     },
     despawn: { ...base, type: "despawn", objectId: "ship-1", reason: "disconnect" },
     hit_report: { ...base, type: "hit_report", targetId: "ship-1", sourceId: "ship-2", damage: 42, damageType: "shield" },
@@ -154,6 +155,26 @@ test("session: includes both optional fields when both are present, neither when
     const canonical = serializeCanonical(withNeither.message);
     assert.equal(canonical.includes("playerName"), false);
     assert.equal(canonical.includes("countdownSeconds"), false);
+  }
+});
+
+test("spawn: category (C3) is included when present, omitted (not null) when absent", () => {
+  const withCategory = parseMessage(
+    JSON.stringify({ ...base, type: "spawn", objectId: "npc-1", shipType: "ship_par_l_freighter_01_a_macro", owner: "Alice", category: "npc" })
+  );
+  assert.equal(withCategory.ok, true);
+  if (withCategory.ok) {
+    const canonical = JSON.parse(serializeCanonical(withCategory.message));
+    assert.equal(canonical.category, "npc");
+  }
+
+  const withoutCategory = parseMessage(
+    JSON.stringify({ ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice" })
+  );
+  assert.equal(withoutCategory.ok, true);
+  if (withoutCategory.ok) {
+    const canonical = serializeCanonical(withoutCategory.message);
+    assert.equal(canonical.includes("category"), false);
   }
 });
 

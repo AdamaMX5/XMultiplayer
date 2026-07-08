@@ -228,3 +228,66 @@ test("hasOtherActiveSpawn() no longer trips once the member's prior spawn was re
 
   assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice-2"), false);
 });
+
+// --- C3: npcSpawnCount() / recordSpawn()'s category ---
+
+test("npcSpawnCount() is 0 for a member with no spawns at all", () => {
+  const sessions = new SessionManager();
+  assert.equal(sessions.npcSpawnCount("a"), 0);
+});
+
+test("recordSpawn() defaults category to \"player\" when omitted (A1-C2 callers)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}');
+  assert.equal(sessions.npcSpawnCount("a"), 0, "a category-less spawn must count as \"player\", not \"npc\"");
+});
+
+test("npcSpawnCount() counts only \"npc\"-category spawns, not the member's player-ship spawn", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}', "player");
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc");
+  sessions.recordSpawn("arena-1", "a", "npc-2", '{"objectId":"npc-2"}', "npc");
+
+  assert.equal(sessions.npcSpawnCount("a"), 2);
+});
+
+test("npcSpawnCount() is unaffected by another member's npc spawns", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.join("arena-1", { id: "b", playerName: "Bob" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc");
+  sessions.recordSpawn("arena-1", "b", "npc-2", '{"objectId":"npc-2"}', "npc");
+
+  assert.equal(sessions.npcSpawnCount("a"), 1);
+  assert.equal(sessions.npcSpawnCount("b"), 1);
+});
+
+test("npcSpawnCount() decreases after removeSpawn() for one of the member's npcs", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc");
+  sessions.recordSpawn("arena-1", "a", "npc-2", '{"objectId":"npc-2"}', "npc");
+  sessions.removeSpawn("arena-1", "npc-1");
+
+  assert.equal(sessions.npcSpawnCount("a"), 1);
+});
+
+test("npcSpawnCount() is 0 after takeSpawnedObjectIds() (e.g. disconnect)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc");
+  sessions.recordSpawn("arena-1", "a", "npc-2", '{"objectId":"npc-2"}', "npc");
+  sessions.takeSpawnedObjectIds("a", "arena-1");
+
+  assert.equal(sessions.npcSpawnCount("a"), 0);
+});
+
+test("hasOtherActiveSpawn() is true when the member has an npc spawn plus a different player spawn (categories don't exempt each other from that check)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc");
+
+  assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice-1"), true);
+});

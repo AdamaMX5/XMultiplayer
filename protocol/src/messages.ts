@@ -50,6 +50,25 @@ export interface StateUpdateMessage extends EnvelopeBase {
   mdRate?: number;
 }
 
+/**
+ * C3 "NPC-Bubble mit Interest Management": distinguishes a player's own ship
+ * (the only kind of `spawn` that existed through C2) from an exported NPC.
+ * Optional and defaults to "player" wherever absent (protocol/src/parse.ts),
+ * so every A1-C2 sender/message stays valid without change. The distinction
+ * matters at the server trust boundary (server/src/server.ts,
+ * server/src/sessionManager.ts): a client may have only ONE active
+ * "player"-category spawn (A4's original spawn cap, unchanged), but may have
+ * up to MAX_NPC_SPAWNS_PER_CLIENT (protocol/src/limits.ts) active
+ * "npc"-category spawns at once -- a fundamentally different cap for a
+ * fundamentally different kind of spawn, not a relaxation of the original
+ * one. `shipType`'s whitelist (SHIP_MACRO_WHITELIST, shipMacros.ts) is
+ * ALSO skipped for "npc" -- that whitelist is a small, hand-picked set of
+ * Arena PvP starting ships, never meant to cover the real diversity of X4
+ * NPC traffic (freighters, miners, capital ships, every race/faction) -- see
+ * docs/C3-messprotokoll.md for the resulting trust-boundary changes.
+ */
+export type SpawnCategory = "player" | "npc";
+
 export interface SpawnMessage extends EnvelopeBase {
   type: "spawn";
   objectId: string;
@@ -68,6 +87,8 @@ export interface SpawnMessage extends EnvelopeBase {
    */
   maxHull?: number;
   maxShield?: number;
+  /** C3: "player" (default when absent, A1-C2 compatible) or "npc". See this file's own doc comment above SpawnCategory. */
+  category?: SpawnCategory;
 }
 
 export interface DespawnMessage extends EnvelopeBase {

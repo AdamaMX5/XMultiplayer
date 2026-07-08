@@ -34,6 +34,27 @@ test("forwards a despawn regardless of content (no shipType to check, no ownersh
   assert.equal(decision.forward, true);
 });
 
+// --- C3: "npc"-category spawns skip the shipType whitelist ---
+
+test("forwards a spawn with category npc and an unwhitelisted shipType", () => {
+  const decision = decideRelay(
+    { ...base, type: "spawn", objectId: "npc-1", shipType: "ship_par_l_freighter_01_a_macro", owner: "Alice", category: "npc" },
+    noneKnown
+  );
+  assert.equal(decision.forward, true);
+});
+
+test("still rejects a spawn with category player (or no category) and an unwhitelisted shipType", () => {
+  const withCategory = decideRelay(
+    { ...base, type: "spawn", objectId: "ship-1", shipType: "totally_made_up_macro", owner: "Alice", category: "player" },
+    noneKnown
+  );
+  assert.equal(withCategory.forward, false);
+
+  const withoutCategory = decideRelay({ ...base, type: "spawn", objectId: "ship-1", shipType: "totally_made_up_macro", owner: "Alice" }, noneKnown);
+  assert.equal(withoutCategory.forward, false);
+});
+
 test("forwards a state_update for a known shipId within plausible bounds", () => {
   const decision = decideRelay(stateUpdate(), new Set(["ship-1"]));
   assert.equal(decision.forward, true);

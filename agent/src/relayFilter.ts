@@ -14,7 +14,15 @@ export type RelayDecision = { forward: true } | { forward: false; reason: string
  * member) may be forwarded into the pipe (game). From A2 on this is a trust
  * boundary, expanded again in A4:
  *   - `spawn` naming a `shipType` outside the known-good whitelist is rejected
- *     (A2), before it ever reaches `create_ship` in the mod.
+ *     (A2), before it ever reaches `create_ship` in the mod -- EXCEPT for
+ *     `category: "npc"` spawns (C3), which skip this check entirely.
+ *     SHIP_MACRO_WHITELIST is a small, hand-picked set of Arena PvP starting
+ *     ships and was never meant to cover real X4 NPC traffic (freighters,
+ *     miners, capital ships, every race/faction); parseMessage's
+ *     MAX_MACRO_NAME_LENGTH cap on shipType (protocol/src/parse.ts, applies to
+ *     every spawn regardless of category) is the one bound npc shipType gets
+ *     in its place, the same trust posture C1 already established for
+ *     sector_object.macroName (no whitelist there either).
  *   - `state_update` with a position/velocity outside plausible Arena bounds is
  *     rejected (A4), before it ever reaches `set_object_position`/the AI-script's
  *     Dead Reckoning math.
@@ -33,7 +41,7 @@ export type RelayDecision = { forward: true } | { forward: false; reason: string
  * that state_update already needs.
  */
 export function decideRelay(msg: ProtocolMessage, knownObjectIds: ReadonlySet<string>): RelayDecision {
-  if (msg.type === "spawn" && !isKnownShipMacro(msg.shipType)) {
+  if (msg.type === "spawn" && msg.category !== "npc" && !isKnownShipMacro(msg.shipType)) {
     return { forward: false, reason: `unknown shipType "${msg.shipType}", rejected by whitelist` };
   }
   if (msg.type === "state_update") {

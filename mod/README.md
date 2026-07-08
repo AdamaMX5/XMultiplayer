@@ -112,6 +112,24 @@ its own ship exactly once. This loopback is the one part of C2 that IS
 end-to-end VERIFIED, not just PLAUSIBLE (`agent/tests/relayToPipe.e2e.test.ts`
 spawns the real agent process and observes it over a real pipe/WebSocket).
 
+Milestone C3 (PlanMod.md Phase 2, "NPC-Bubble mit Interest Management",
+`docs/C3-messprotokoll.md`): periodically exports NPC ships near the
+player's own position as ordinary `spawn`/`state_update`/`despawn` messages
+(a new `category: "npc"` on `spawn`, `protocol/src/messages.ts`), reusing
+`XMP_Arena_HandleSpawn`/`HandleDespawn`/`HandleStateUpdate`/
+`aiscripts/XMP.ProxyPilot.xml` completely unchanged -- the same "Arena-Code
+wiederverwendet" principle C2 established for player ships. Getting there
+required real protocol/server/agent changes first: A4's one-active-spawn-
+per-client cap now applies only to `category: "player"`, a separate
+`MAX_NPC_SPAWNS_PER_CLIENT` budget applies to `category: "npc"`, and
+`SHIP_MACRO_WHITELIST` is skipped entirely for NPCs (never meant to cover
+real X4 NPC diversity) in favor of a length cap plus pipe sanitizing. The
+mod-side bubble logic (`XMP_Coop_BubbleCheck`, `md/XMP_Coop.xml`) is this
+project's most speculative MD code yet -- enumeration, distance sorting,
+budget enforcement, and timeout-based lifecycle tracking all combined, with
+zero prior art anywhere in real X4 MD scripting knowledge to lean on beyond
+this project's own C1 precedent.
+
 **Status: PLAUSIBLE, not VERIFIED (mod side); the server/agent-side logic IS
 VERIFIED** (real `node:test` tests throughout `server/tests/` and
 `agent/tests/`, including a real spawned-process end-to-end test for the C2
@@ -124,14 +142,16 @@ received JSON string at all, the `<aiscript>` root shape, `move.to.position`, an
 `event_object_attacked`/`event_object_fired` exist as assumed (A4), whether
 `player.sector`/`player.entity.hullmax`/`player.timewarp` exist as assumed
 (A5), whether a `find_object`-style sector enumeration and `create_station`-style
-placeholder placement exist as assumed (C1), and now -- C2 -- whether
-`XMP_Coop_HandleSessionJoin`'s `playerName == player.name` self-detection
-actually distinguishes a looped-back own join from a real remote one the way
-assumed) are assumptions documented inline in `md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
+placeholder placement exist as assumed (C1), whether `XMP_Coop_HandleSessionJoin`'s
+`playerName == player.name` self-detection works as assumed (C2), and now --
+C3 -- whether `find_object`'s three further assumed attributes
+(`position`/`maxdist`/`sortbydistanceto`) and its new `class='ship'` value
+exist as assumed) are assumptions documented inline in
+`md/XMP_Telemetry.xml`/`md/XMP_Arena.xml`/
 `md/XMP_Coop.xml`/`aiscripts/XMP.ProxyPilot.xml` and in
-`docs/A1-messprotokoll.md` through `docs/C2-messprotokoll.md`. In-game
-validation is the first open task for all seven milestones; A2's JSON-parsing
-assumption must be validated before A3-C2 can be tested at all (no
+`docs/A1-messprotokoll.md` through `docs/C3-messprotokoll.md`. In-game
+validation is the first open task for all eight milestones; A2's JSON-parsing
+assumption must be validated before A3-C3 can be tested at all (no
 state_update/hit_report/hp_state/session/sector_object data reaches the
 blackboard or the player's own ship otherwise).
 

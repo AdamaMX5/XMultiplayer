@@ -20,3 +20,13 @@ export const MAX_MESSAGE_BYTES = 64 * 1024;
  */
 export const MAX_SECTOR_OBJECTS_PER_MIRROR = 2000;
 export const MAX_MACRO_NAME_LENGTH = 64;
+
+/**
+ * C3 "NPC-Bubble mit Interest Management": max simultaneous "npc"-category
+ * spawns (SpawnMessage.category) a single client may own, enforced server-side
+ * (server/src/server.ts, server/src/sessionManager.ts) independently of A4's
+ * original one-"player"-spawn cap. Matches PlanMod.md's own number ("volle
+ * Update-Rate nur für die ~10 nächsten/relevantesten Objekte") -- doubles as
+ * this milestone's answer to "Budget definieren: max. Proxy-Anzahl beim Gast".
+ */
+export const MAX_NPC_SPAWNS_PER_CLIENT = 10;

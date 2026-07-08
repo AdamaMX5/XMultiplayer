@@ -1,3 +1,5 @@
+import type { SpawnCategory } from "@xmultiplayer/protocol";
+
 export interface SessionMember {
   id: string;
   playerName: string;
@@ -24,6 +26,12 @@ export class SessionManager {
   // objectId -> the memberId that spawned it, so a single object (e.g. destroyed in
   // combat, A4) can be un-recorded without touching that member's OTHER spawns.
   private ownerByObjectId = new Map<string, string>();
+  // objectId -> its SpawnMessage.category (C3), defaulted to "player" by recordSpawn
+  // when the sender omitted it (A1-C2 compatibility). Kept as its own parallel map,
+  // same idiom as ownerByObjectId, rather than folding category into the raw spawn
+  // string -- npcSpawnCount() below needs to filter spawnsByMember by category
+  // without re-parsing every member's raw spawn line on every spawn attempt.
+  private categoryByObjectId = new Map<string, SpawnCategory>();
 
   /**
    * A client can only be in one session at a time, so joining calls leave()
@@ -92,8 +100,12 @@ export class SessionManager {
     return (this.sessions.get(sessionCode)?.size ?? 0) > 0;
   }
 
-  /** Records that memberId spawned objectId in sessionCode, keeping the raw message for replay. */
-  recordSpawn(sessionCode: string, memberId: string, objectId: string, raw: string): void {
+  /**
+   * Records that memberId spawned objectId in sessionCode, keeping the raw
+   * message for replay. `category` defaults to "player" (C3): every A1-C2
+   * caller predates the category field and means a player-ship spawn.
+   */
+  recordSpawn(sessionCode: string, memberId: string, objectId: string, raw: string, category: SpawnCategory = "player"): void {
     const bySession = this.spawnsBySession.get(sessionCode) ?? new Map<string, string>();
     bySession.set(objectId, raw);
     this.spawnsBySession.set(sessionCode, bySession);
@@ -101,6 +113,7 @@ export class SessionManager {
     owned.add(objectId);
     this.spawnsByMember.set(memberId, owned);
     this.ownerByObjectId.set(objectId, memberId);
+    this.categoryByObjectId.set(objectId, category);
   }
 
   /** Raw spawn messages currently known for a session, e.g. to replay to a newly joined member. */
@@ -118,6 +131,7 @@ export class SessionManager {
     for (const objectId of owned) {
       bySession?.delete(objectId);
       this.ownerByObjectId.delete(objectId);
+      this.categoryByObjectId.delete(objectId);
     }
     return [...owned];
   }
@@ -133,6 +147,7 @@ export class SessionManager {
     if (memberId) {
       this.spawnsByMember.get(memberId)?.delete(objectId);
       this.ownerByObjectId.delete(objectId);
+      this.categoryByObjectId.delete(objectId);
     }
   }
 
@@ -159,5 +174,22 @@ export class SessionManager {
       if (ownedId !== objectId) return true;
     }
     return false;
+  }
+
+  /**
+   * Count of memberId's currently active "npc"-category spawns (C3), enforced
+   * against MAX_NPC_SPAWNS_PER_CLIENT in server.ts -- a SEPARATE budget from
+   * hasOtherActiveSpawn's one-"player"-spawn cap above, not a relaxation of
+   * it. A re-spawn of an objectId the member already owns doesn't change this
+   * count (spawnsByMember is a Set, adding an existing member is a no-op).
+   */
+  npcSpawnCount(memberId: string): number {
+    const owned = this.spawnsByMember.get(memberId);
+    if (!owned) return 0;
+    let count = 0;
+    for (const objectId of owned) {
+      if (this.categoryByObjectId.get(objectId) === "npc") count += 1;
+    }
+    return count;
   }
 }

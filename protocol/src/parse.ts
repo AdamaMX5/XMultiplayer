@@ -99,13 +99,25 @@ function validateStateUpdate(obj: Fields): ParseResult {
   return ok(obj as unknown as StateUpdateMessage);
 }
 
+const SPAWN_CATEGORIES = new Set(["player", "npc"]);
+
 function validateSpawn(obj: Fields): ParseResult {
   if (!isString(obj, "objectId")) return fail("spawn.objectId must be a string");
   if (!isString(obj, "shipType")) return fail("spawn.shipType must be a string");
+  // C3: applies to EVERY spawn, not just category "npc" -- SHIP_MACRO_WHITELIST
+  // entries are all well under this length anyway, so this is a no-op for
+  // "player" spawns and the one real bound "npc" spawns get, in the absence of
+  // any whitelist for them (see SpawnMessage.category's own doc comment).
+  if ((obj.shipType as string).length > MAX_MACRO_NAME_LENGTH) {
+    return fail(`spawn.shipType exceeds max length of ${MAX_MACRO_NAME_LENGTH}`);
+  }
   if (!isString(obj, "owner")) return fail("spawn.owner must be a string");
   if (!isStringArray(obj.loadout)) return fail("spawn.loadout must be an array of strings if present");
   if (!isOptionalNumber(obj, "maxHull")) return fail("spawn.maxHull must be a number if present");
   if (!isOptionalNumber(obj, "maxShield")) return fail("spawn.maxShield must be a number if present");
+  if (obj.category !== undefined && (typeof obj.category !== "string" || !SPAWN_CATEGORIES.has(obj.category))) {
+    return fail('spawn.category must be "player" or "npc" if present');
+  }
   return ok(obj as unknown as SpawnMessage);
 }
 

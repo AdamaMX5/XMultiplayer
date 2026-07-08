@@ -71,6 +71,46 @@ test("leaves sector_mirror completely untouched (no free-form text fields)", () 
   assert.deepEqual(sanitizeForPipe(msg), msg);
 });
 
+// --- C3: an "npc"-category spawn's objectId/shipType are sanitized, a "player" one is not ---
+
+test("sanitizes objectId and shipType for a spawn with category npc", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "spawn",
+    objectId: "npc-{evil},1",
+    shipType: "ship_{evil}, freighter_macro",
+    owner: "Alice",
+    category: "npc",
+  };
+  const result = sanitizeForPipe(msg) as typeof msg;
+  assert.equal(result.objectId, "npc-evil1");
+  assert.equal(result.shipType, "ship_evil freighter_macro");
+  assert.equal(result.owner, "Alice", "owner is not one of the sanitized fields");
+});
+
+test("leaves a spawn with category player untouched, even with MD-breaking characters (pre-existing, out-of-scope gap for player spawns)", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "spawn",
+    objectId: "ship-{evil},1",
+    shipType: "ship_arg_s_fighter_01_a_macro",
+    owner: "Alice",
+    category: "player",
+  };
+  assert.deepEqual(sanitizeForPipe(msg), msg);
+});
+
+test("leaves a spawn with no category untouched (defaults to player behavior)", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "spawn",
+    objectId: "ship-{evil},1",
+    shipType: "ship_arg_s_fighter_01_a_macro",
+    owner: "Alice",
+  };
+  assert.deepEqual(sanitizeForPipe(msg), msg);
+});
+
 test("does not mutate the original message object", () => {
   const msg: ProtocolMessage = { ...base, type: "chat", from: "{Clan} Bob", text: "hi" };
   const original = { ...msg };

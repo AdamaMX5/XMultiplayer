@@ -43,6 +43,7 @@ export function serializeCanonical(msg: ProtocolMessage): string {
         owner: msg.owner,
         ...(msg.maxHull !== undefined ? { maxHull: msg.maxHull } : {}),
         ...(msg.maxShield !== undefined ? { maxShield: msg.maxShield } : {}),
+        ...(msg.category !== undefined ? { category: msg.category } : {}),
       });
     case "despawn":
       return JSON.stringify({

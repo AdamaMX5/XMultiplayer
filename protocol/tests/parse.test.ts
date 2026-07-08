@@ -70,6 +70,40 @@ test("rejects spawn with a non-string-array loadout", () => {
   assert.equal(result.ok, false);
 });
 
+// --- C3 "NPC-Bubble mit Interest Management" ---
+
+test("accepts a spawn with category npc", () => {
+  const msg = { ...base, type: "spawn", objectId: "npc-1", shipType: "ship_par_l_freighter_01_a_macro", owner: "Alice", category: "npc" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.type === "spawn") assert.equal(result.message.category, "npc");
+});
+
+test("accepts a spawn with category player", () => {
+  const msg = { ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", category: "player" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("accepts a spawn with no category at all (A1-C2 compatible)", () => {
+  const msg = { ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.type === "spawn") assert.equal(result.message.category, undefined);
+});
+
+test("rejects a spawn with an invalid category", () => {
+  const msg = { ...base, type: "spawn", objectId: "ship-1", shipType: "ship_arg_s_fighter_01_a_macro", owner: "Alice", category: "boss" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects a spawn with a shipType over the max macro name length", () => {
+  const msg = { ...base, type: "spawn", objectId: "npc-1", shipType: "x".repeat(65), owner: "Alice", category: "npc" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
 test("accepts a valid despawn", () => {
   const msg = { ...base, type: "despawn", objectId: "obj-1", reason: "session_end" };
   const result = parseMessage(JSON.stringify(msg));
