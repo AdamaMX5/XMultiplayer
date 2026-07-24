@@ -152,11 +152,11 @@ function validateFireEvent(obj: Fields): ParseResult {
   return ok(obj as unknown as FireEventMessage);
 }
 
-const SESSION_ACTIONS = new Set(["join", "leave", "ready", "countdown", "seta_on", "seta_off"]);
+const SESSION_ACTIONS = new Set(["join", "leave", "ready", "countdown", "seta_on", "seta_off", "sector_change"]);
 
 function validateSession(obj: Fields): ParseResult {
   if (typeof obj.action !== "string" || !SESSION_ACTIONS.has(obj.action)) {
-    return fail('session.action must be one of "join", "leave", "ready", "countdown", "seta_on", "seta_off"');
+    return fail('session.action must be one of "join", "leave", "ready", "countdown", "seta_on", "seta_off", "sector_change"');
   }
   if (!isString(obj, "sessionCode")) return fail("session.sessionCode must be a string");
   if (!isOptionalString(obj, "playerName")) return fail("session.playerName must be a string if present");

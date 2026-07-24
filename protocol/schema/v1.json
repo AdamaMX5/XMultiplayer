@@ -137,7 +137,7 @@
           "required": ["action", "sessionCode"],
           "properties": {
             "type": { "const": "session" },
-            "action": { "enum": ["join", "leave", "ready", "countdown"] },
+            "action": { "enum": ["join", "leave", "ready", "countdown", "seta_on", "seta_off", "sector_change"] },
             "sessionCode": { "type": "string" },
             "playerName": { "type": "string" },
             "countdownSeconds": { "type": "number" }

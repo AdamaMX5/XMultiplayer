@@ -240,6 +240,56 @@
         server-side (server/src/server.ts's broadcastKillFeed now names an NPC
         victim by its shipType instead of the exporting player's own name -
         see that function's own doc comment). See docs/C4-messprotokoll.md.
+
+    Milestone C5 ("Sektorwechsel"): XMP_Coop_SectorChangeLoop/
+    SectorChangeCheck below detect OUR OWN sector changing (e.g. a gate
+    transit) and react with two local teardowns plus a broadcast -
+    XMP_Coop_HandleSectorChange's own comment carries the full design. In
+    short: destroy every currently-held static sector-mirror placeholder
+    (finally closing the "no despawn/teardown path for sector proxies"
+    limitation C1 explicitly deferred to this milestone), force-clear the
+    NPC bubble immediately instead of waiting for its normal stale timeout
+    (PlanMod.md's own "Bubble abreißen" wording, taken literally), then
+    broadcast a new `session` `sector_change` action (protocol/src/
+    messages.ts's SessionAction, C5's one protocol addition) so every OTHER
+    session member re-exports their own current sector to us
+    (XMP_Coop_HandleSessionJoin, extended to treat `sector_change` the same
+    as someone else's `join` for sector-mirroring purposes).
+
+    Resolves the "Host und Gast in verschiedenen Sektoren" edge case
+    PlanMod.md flags for C5 - but not by building the two-bubbles-in-
+    parallel machinery PlanMod's own prose speculates about. Because the NPC
+    bubble (C3) already centers on EACH CLIENT'S OWN ship position and
+    queries `player.sector` fresh every tick, independently per client, two
+    session members already end up with two entirely independent, correctly
+    self-scoped bubbles the moment they are in different sectors - nothing
+    in this design assumed they'd be in the same one. The only actual gap
+    was static-sector-mirror staleness after a move, which this milestone's
+    teardown/re-export closes. The bubble-center generalization noted above
+    (centering on every OTHER member's position instead of only our own, for
+    3+-player sessions) remains open - a different, unrelated question from
+    the different-sectors case, now resolved to be a non-issue.
+
+    DELIBERATELY NOT ATTEMPTED IN C5 (same posture as C1-C4's own lists):
+      - No "Ladebildschirm"/fade UI of any kind - PlanMod.md itself says
+        "kein nahtloser Übergang nötig" (no seamless transition needed); the
+        teardown is an instant, silent state reset, not a presented visual
+        effect (X4's OWN gate-transit loading screen, unrelated to this
+        mod, already provides the "moment" PlanMod.md's wording refers to).
+      - Our own ship's proxy on other members' clients is NOT explicitly
+        snap-corrected by any new C5 code - a gate transit is a huge
+        position delta, already well past
+        $XMP.DeadReckoningSnapThresholdMeters (500m, XMP_Arena_
+        TuningDefaults), so aiscripts/XMP.ProxyPilot.xml's EXISTING Dead
+        Reckoning snap-teleport fallback (A3) already handles it: nothing
+        new was needed here, a genuinely reused mechanism rather than a
+        deferred gap.
+      - `sector_change`'s `sessionCode` field hardcodes the LAN default
+        `"arena"`, inaccurate for a real Coop session's actual code - the
+        SAME pre-existing limitation XMP_Arena_SetaCheck's seta_on/seta_off
+        broadcasts already have (A5), not a new one, and harmless for the
+        same reason (server/src/server.ts never reads `sessionCode` for
+        anything but the "join" action). See docs/C5-messprotokoll.md.
   -->
   <cues>
     <!--
@@ -275,9 +325,24 @@
       Dispatched from XMP_Arena_Dispatch (mod/md/XMP_Arena.xml) whenever a
       `session` message of ANY action is received - mirrors how that same
       dispatch branch already also feeds XMP_Arena_HandleSetaStatus, which
-      independently no-ops for actions it doesn't care about. Only "join"
-      is acted on; every other action (leave/ready/countdown/seta_on/seta_off)
-      is silently ignored here.
+      independently no-ops for actions it doesn't care about. "join" and,
+      since C5, "sector_change" are acted on; every other action (leave/
+      ready/countdown/seta_on/seta_off) is silently ignored here.
+
+      C5 "Sektorwechsel": a `sector_change` (broadcast by
+      XMP_Coop_HandleSectorChange below, whenever ANY session member's own
+      sector changes) is treated exactly like someone ELSE'S join for
+      sector-mirroring purposes - re-export our own current sector
+      (XMP_Coop_ExportSector, unchanged) so the mover's now-empty mirror of
+      us gets repopulated. Unlike the "join" branch, this needs NO self/
+      other distinction: `sector_change` has no agent-side pipe-loopback
+      mechanism the way an explicit-session join does (see this cue's C2
+      commentary below) - it only ever reaches this cue via the normal
+      server broadcast, which already excludes the sender, so the mover's
+      OWN client structurally never receives its own sector_change here.
+      The mover's own local teardown (stale mirror + NPC bubble) happens
+      synchronously in XMP_Coop_HandleSectorChange itself, not via this
+      dispatch path.
 
       C2 extends this beyond C1's sector export with a SELF/OTHER distinction,
       keyed on the join's playerName versus our own player.name:
@@ -333,6 +398,13 @@
               </do_if>
             </do_all>
           </do_if>
+
+          <do_if value="$XMP.CoopRxAction == 'sector_change'">
+            <do_all>
+              <debug_text text="'[XMultiplayer][Coop] a session member changed sector, re-exporting our current sector to them'" filter="general" />
+              <include_interrupt_actions ref="XMP_Coop_ExportSector" />
+            </do_all>
+          </do_if>
         </do_all>
       </actions>
     </cue>
@@ -368,6 +440,149 @@
           </actions>
         </cue>
       </cues>
+    </cue>
+
+    <!--
+      C5 "Sektorwechsel": detects OUR OWN sector changing (e.g. a gate
+      transit) while a Coop session may be active, same polling idiom as
+      XMP_Arena_PresenceLoop/SetaLoop (1s cadence - a sector change is a rare,
+      not a telemetry-rate event) and runs unconditionally from Reloaded,
+      same as XMP_Coop_BubbleTuningDefaults/BubbleCheck (C3) - it relies on
+      the SERVER to silently drop anything sent while not actually a member
+      of any session (`sessions.sessionCodeOf(clientId)` check,
+      server/src/server.ts), rather than gating itself on
+      $XMP.CoopSelfAnnounced first. $XMP.CoopLastSectorMacroName seeds to
+      `''` (no real sector name is ever the empty string), so the FIRST
+      observation after a (re)load is never mistaken for a change - the same
+      role XMP_Arena_PresenceLoop's `$XMP.WasInArenaSector = false` seed
+      plays for its own boolean comparison, just adapted for a string
+      baseline with no natural "false" value.
+    -->
+    <cue name="XMP_Coop_SectorChangeLoop" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Named_Pipes.Reloaded" />
+      </conditions>
+      <actions>
+        <do_all>
+          <set_value name="$XMP.CoopLastSectorMacroName" exact="''" />
+          <set_value name="$XMP.CoopSectorProxyKnownIds" exact="[]" />
+        </do_all>
+      </actions>
+      <cues>
+        <include cue="XMP_Coop_SectorChangeCheck" />
+      </cues>
+    </cue>
+
+    <cue name="XMP_Coop_SectorChangeCheck" instantiate="true">
+      <delay exact="1s" />
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship">
+          <do_all>
+            <set_value name="$XMP.CoopCurrentSectorMacroName" exact="player.sector.macro.name" />
+            <do_if value="$XMP.CoopLastSectorMacroName != '' and $XMP.CoopCurrentSectorMacroName != $XMP.CoopLastSectorMacroName">
+              <include_interrupt_actions ref="XMP_Coop_HandleSectorChange" />
+            </do_if>
+            <set_value name="$XMP.CoopLastSectorMacroName" exact="$XMP.CoopCurrentSectorMacroName" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Coop_SectorChangeCheck_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      C5 "Sektorwechsel" - the actual teardown, triggered by
+      XMP_Coop_SectorChangeCheck the moment it notices OUR OWN sector no
+      longer matches its last-seen value. Two independent local cleanups,
+      framed deliberately as an explicit "Ladebildschirm-Moment" (PlanMod.md's
+      own wording: "kein nahtloser Übergang nötig", no graceful fade needed),
+      plus a broadcast so other members refresh their side of the mirror:
+
+        1. Static sector mirror ($XMP.SectorProxies, C1): C1 explicitly
+           deferred ever tearing this down ("no despawn/teardown path for
+           sector proxies... revisit once C5 exists" - see that file's own
+           header). Every currently-held placeholder for the OLD sector is
+           destroyed and forgotten (both the keyed tables and the C5-added
+           $XMP.CoopSectorProxyKnownIds list are cleared), so
+           XMP_Coop_HandleSectorObject's own idempotency guard
+           ("not $XMP.SectorProxies.{id}.exists") does not mistakenly treat
+           fresh objects for the NEW sector as already-known leftovers from
+           the old one (a real risk if two different sectors ever reused the
+           same underlying object id, however unlikely).
+        2. NPC bubble (C3): PlanMod.md C5 literally says "Bubble abreißen"
+           (tear the bubble down) for a sector change, not "let it expire
+           naturally" - so every currently-tracked NPC is despawned
+           immediately here (reason "sector_change", distinguishable in logs
+           from C3's own "left_bubble"), instead of waiting up to
+           $XMP.CoopBubbleStaleTimeoutSec (5s) for XMP_Coop_BubbleCheck's own
+           stale-timeout pass to notice each one is unreachable in the new
+           sector. All three C3/C4 per-id bubble tables
+           ($XMP.CoopBubbleKnown/CoopBubbleLastSeenAt/
+           CoopBubbleGameObjectByWireId) plus $XMP.CoopBubbleKnownIds itself
+           are cleared the same way XMP_Coop_ForgetBubbleNpc (C4) does for a
+           single id, just for every currently-tracked id at once - not
+           reusing that cue directly since it is written to remove exactly
+           ONE id via a rebuild-excluding-that-id pass, not to clear
+           everything; a full reset needs no such rebuild.
+
+      Broadcasting `session` `sector_change` (KNOWN, ACCEPTED INACCURACY:
+      hardcodes `sessionCode: "arena"`, matching the SAME pre-existing
+      limitation XMP_Arena_SetaCheck already has for its own seta_on/seta_off
+      broadcasts, A5 - MD never independently learns a Coop session's REAL
+      session code, only the agent does, via its explicit "session" CLI flag
+      or the XMP_SESSION override, C2's own header explains why. Harmless:
+      the server never
+      reads `sessionCode` for anything other than the "join" action itself,
+      routing every other action by the sender's ALREADY-established session
+      membership instead, server/src/server.ts) tells every OTHER session
+      member to re-export their own current sector to us
+      (XMP_Coop_HandleSessionJoin's new sector_change branch above) - our own
+      mirror of THEM would otherwise stay empty in the new sector until that
+      arrives.
+    -->
+    <cue name="XMP_Coop_HandleSectorChange" instantiate="false">
+      <actions>
+        <do_all>
+          <debug_text text="'[XMultiplayer][Coop] sector changed (' + $XMP.CoopLastSectorMacroName + ' -&gt; ' + $XMP.CoopCurrentSectorMacroName + '), tearing down stale mirror'" filter="general" />
+
+          <do_all exact="$XMP.CoopSectorProxyKnownIds" counter="$XMP.CoopSectorTeardownIndex">
+            <set_value name="$XMP.CoopSectorTeardownId" exact="$XMP.CoopSectorTeardownIndex.entry" />
+            <destroy_object object="$XMP.SectorProxies.{$XMP.CoopSectorTeardownId}" explosion="false" />
+            <set_value name="$XMP.SectorProxies.{$XMP.CoopSectorTeardownId}" exact="null" />
+            <set_value name="$XMP.SectorProxyTypes.{$XMP.CoopSectorTeardownId}" exact="null" />
+          </do_all>
+          <set_value name="$XMP.CoopSectorProxyKnownIds" exact="[]" />
+
+          <do_all exact="$XMP.CoopBubbleKnownIds" counter="$XMP.CoopSectorBubbleIndex">
+            <set_value name="$XMP.CoopSectorBubbleId" exact="$XMP.CoopSectorBubbleIndex.entry" />
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;despawn&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;objectId&quot;:&quot;' + $XMP.CoopSectorBubbleId + '&quot;'
+                + ',&quot;reason&quot;:&quot;sector_change&quot;'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+            <set_value name="$XMP.CoopBubbleKnown.{$XMP.CoopSectorBubbleId}" exact="null" />
+            <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopSectorBubbleId}" exact="null" />
+            <set_value name="$XMP.CoopBubbleGameObjectByWireId.{$XMP.CoopSectorBubbleId}" exact="null" />
+          </do_all>
+          <set_value name="$XMP.CoopBubbleKnownIds" exact="[]" />
+
+          <set_value name="$XMP.Json"
+            exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;session&quot;,&quot;action&quot;:&quot;sector_change&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+              + ',&quot;sessionCode&quot;:&quot;arena&quot;'
+              + ',&quot;playerName&quot;:&quot;' + player.name + '&quot;'
+              + '}'" />
+          <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+        </do_all>
+      </actions>
     </cue>
 
     <!--
@@ -608,6 +823,16 @@
                 owner="ownerless" />
               <set_value name="$XMP.SectorProxies.{$XMP.CoopRxObjectId}" exact="$XMP.NewSectorProxy" />
               <set_value name="$XMP.SectorProxyTypes.{$XMP.CoopRxObjectId}" exact="$XMP.CoopRxObjectType" />
+              <!-- C5 "Sektorwechsel": C1 tracked $XMP.SectorProxies only as a
+                   keyed existence table (no iterable list), since C1 itself
+                   never needed to walk "every currently mirrored sector
+                   object" - only ever look one up by a known id. C5 does need
+                   that (tearing all of them down on our OWN sector change,
+                   XMP_Coop_HandleSectorChange below), so this list is now
+                   built alongside the keyed table, same "keep a parallel
+                   list next to the keyed table" idiom C3 already established
+                   for $XMP.CoopBubbleKnownIds. -->
+              <append_to_list name="$XMP.CoopSectorProxyKnownIds" exact="$XMP.CoopRxObjectId" />
               <set_value name="$XMP.CoopReceivedObjectCount" exact="$XMP.CoopReceivedObjectCount + 1" />
               <debug_text text="'[XMultiplayer][Coop] mirrored ' + $XMP.CoopRxObjectType + ' objectId=' + $XMP.CoopRxObjectId" filter="general" />
             </do_all>

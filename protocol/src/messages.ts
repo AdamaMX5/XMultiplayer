@@ -133,8 +133,21 @@ export interface FireEventMessage extends EnvelopeBase {
  * stops updating meaningfully during SETA/pause, so extrapolating its motion
  * would just drift) -- see mod/md/XMP_Arena.xml's XMP_Arena_OnSetaChanged/
  * XMP_Arena_HandleSetaStatus and docs/A5-messprotokoll.md.
+ *
+ * "sector_change" (C5, PlanMod.md Phase 2 "Sektorwechsel"): a client
+ * broadcasts this when it detects the LOCAL player's own sector changed (e.g.
+ * a gate transit) while a Coop session is active. Reuses the plain `session`
+ * envelope (sessionCode/playerName) rather than adding a whole new message
+ * type -- every OTHER session member reacts to it exactly like a fresh
+ * `join` for sector-mirroring purposes (mod/md/XMP_Coop.xml's
+ * XMP_Coop_HandleSessionJoin: re-exports its own current sector to the mover),
+ * while the mover's OWN client reacts locally (independent of any network
+ * round trip) by tearing down its stale static-sector mirror
+ * ($XMP.SectorProxies) and force-clearing the NPC bubble instead of waiting
+ * for its normal stale-timeout despawn -- see mod/md/XMP_Coop.xml's
+ * XMP_Coop_SectorChangeCheck and docs/C5-messprotokoll.md.
  */
-export type SessionAction = "join" | "leave" | "ready" | "countdown" | "seta_on" | "seta_off";
+export type SessionAction = "join" | "leave" | "ready" | "countdown" | "seta_on" | "seta_off" | "sector_change";
 
 export interface SessionMessage extends EnvelopeBase {
   type: "session";

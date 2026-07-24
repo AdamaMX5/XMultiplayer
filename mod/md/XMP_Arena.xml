@@ -363,7 +363,8 @@
           <!-- C1 (mod/md/XMP_Coop.xml): every `session` message ALSO reaches the Coop
                handler, independently of the SETA one above - both branches run for
                the same incoming type, exactly like this. XMP_Coop_HandleSessionJoin
-               itself checks for action == 'join' and no-ops otherwise. -->
+               itself checks the exact action ("join" or, since C5, "sector_change")
+               and no-ops for anything else. -->
           <do_if value="$XMP.RxType == 'session'">
             <include_interrupt_actions ref="XMP_Coop_HandleSessionJoin" />
           </do_if>

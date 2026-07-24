@@ -183,7 +183,7 @@ forgets HP for whatever that client had spawned, exactly like a disconnect does
 
 | Field | Type | Notes |
 |---|---|---|
-| `action` | `"join"` \| `"leave"` \| `"ready"` \| `"countdown"` | |
+| `action` | `"join"` \| `"leave"` \| `"ready"` \| `"countdown"` \| `"seta_on"` \| `"seta_off"` \| `"sector_change"` | `"seta_on"`/`"seta_off"` (A5): broadcast when the local player's SETA/time-acceleration state changes, so others freeze/thaw that player's proxy (`mod/md/XMP_Arena.xml`'s `XMP_Arena_HandleSetaStatus`). `"sector_change"` (C5): broadcast when the local player's own sector changes (e.g. a gate transit) during an active Coop session -- other members re-export their own current sector to the mover (same reaction as a fresh `join`, `mod/md/XMP_Coop.xml`'s `XMP_Coop_HandleSessionJoin`), while the mover tears down its own stale sector mirror and NPC bubble locally (`XMP_Coop_SectorChangeCheck`). See `docs/A5-messprotokoll.md`/`docs/C5-messprotokoll.md`. |
 | `sessionCode` | string | Session identifier both sides agree on; `"arena"` is the LAN default both the agent (`agent/src/config.ts`) and the mod (`XMP_Arena_OnEnterSector`) fall back to when nothing else overrides it. |
 | `playerName` | string (optional) | Display name, expected on `join`. |
 | `countdownSeconds` | number (optional) | Unused/vestigial, see above. |

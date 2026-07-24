@@ -191,6 +191,12 @@ test("accepts session seta_on and seta_off (A5)", () => {
   assert.equal(off.ok, true);
 });
 
+test("accepts session sector_change (C5)", () => {
+  const msg = { ...base, type: "session", action: "sector_change", sessionCode: "arena-1", playerName: "Alice" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
 test("accepts a valid chat message", () => {
   const msg = { ...base, type: "chat", from: "Alice", text: "gg" };
   const result = parseMessage(JSON.stringify(msg));
