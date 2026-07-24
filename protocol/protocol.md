@@ -143,6 +143,47 @@ Actual damage is never derived from this message -- only from `hit_report`/`hp_s
 | `origin` | `{x,y,z}` | Muzzle/origin position at fire time. |
 | `direction` | `{x,y,z}` | Fire direction vector. |
 
+### `dock_request` / `dock_response`
+**Direction:** client -> server -> exactly ONE other client (C6, PlanMod.md
+Phase 2 "Kommando-Relay"). The first pair of message types in this protocol
+that are NOT broadcast to the whole session -- the server routes each to
+exactly the one member it concerns (`server/src/server.ts`'s `sendToMember`):
+`dock_request` goes to whichever member owns/exported the target
+`sector_object` (tracked since C6 via a new `sectorObjectOwnerOf` lookup,
+`server/src/sessionManager.ts`); `dock_response` goes to whichever member owns
+the requester's ship (the existing `ownerOf`, reused as-is -- no new
+"pending request" bookkeeping needed, since the requester's own ship spawn
+already IS the routing key). Both require ownership of the field that grants
+routing authority: `dock_request.requesterId` must be owned by the sender (A4
+ownership authority, same as `state_update`/`despawn`/`fire_event`);
+`dock_response.targetId` must be owned by the sender (new for C6, rejects a
+member responding on behalf of a station it doesn't own).
+**Purpose:** "Gast will an Station X docken" -> Host validiert, bestätigt --
+PlanMod.md's "jede Interaktion = eigenes Mini-Protokoll" principle, Docking
+being the first and simplest of that family (repair/resupply, trade, fleet
+commands, and mission-sharing remain unimplemented, see
+`docs/C6-messprotokoll.md`). Physically docking at a mirrored `sector_object`
+placeholder was already possible before C6 (nothing server-side prevents it),
+just without consequence in the host's real game; this exchange is what makes
+it a validated, acknowledged interaction instead -- though since no
+economy/ship-registry exists yet, "approved" does not yet trigger any further
+game-state change, only the confirmation itself.
+
+| Field | Type | Notes |
+|---|---|---|
+| `targetId` | string | The target station's `sector_object.objectId`. |
+| `requesterId` | string | The requesting player's own ship, i.e. their `spawn.objectId`. |
+| `approved` | boolean (`dock_response` only) | Whether the station's owner confirmed the dock. |
+| `reason` | string (optional, `dock_response` only) | Free-form, only meaningful when `approved` is false. Sanitized server-side (`sanitizeChatText`) before relaying, same trust posture as `chat.text`. |
+
+**Known, accepted simplification (C6 V1):** the server does not track which
+`dock_request` a `dock_response` actually answers -- a member owning
+`targetId` could send an unsolicited `dock_response` for any `requesterId`
+whose ship it can name, and the routed recipient has no way to tell a
+solicited response from an unsolicited one. Harmless for now (there is no
+real consequence -- no credits, no ship-registry -- attached to `approved`
+yet), revisit once repair/resupply or trade give `approved` real stakes.
+
 ## Server-side validation (trust boundary), summary
 
 Every field above documents its own specific check; this is just the index. Since
@@ -156,6 +197,7 @@ data to relay; A4 substantially expands that:
 | Arena position/velocity bounds | `agent/src/relayFilter.ts` (`decideRelay`) AND `server/src/server.ts` (A5: same gap-closing rationale as the whitelist above), `protocol/src/arenaBounds.ts` | `state_update` with an implausible position or velocity. |
 | Orphan filter | `agent/src/relayFilter.ts` (`decideRelay`) | `state_update`/`hit_report` for a `shipId`/`targetId` with no known spawn -- also what keeps the agent's `LatencyTracker` map bounded. |
 | Ownership authority | `server/src/server.ts` (`requireOwnership`), `server/src/sessionManager.ts` (`ownerOf`) | `spawn`/`state_update`/`despawn`/`fire_event` referencing an `objectId` the sender does not own. |
+| Sector-object/dock ownership (C6) | `server/src/server.ts`, `server/src/sessionManager.ts` (`recordSectorObject`/`sectorObjectOwnerOf`) | `dock_response` claiming a `targetId` the sender did not export; `dock_request`/`dock_response` are additionally routed point-to-point (`sendToMember`), never broadcast, and dropped if the resolved recipient is no longer a member of the sender's own session. |
 | Spawn cap | `server/src/sessionManager.ts` (`hasOtherActiveSpawn`) | A second, different `objectId` spawned by a client that already has one active. |
 | Respawn gate (A5) | `server/src/server.ts` | A `spawn` for an `objectId` the sender STILL actively owns (not yet destroyed/despawned) -- closes a free, unlimited self-heal (`hp.register()` resets HP unconditionally). |
 | Damage validation | `server/src/hpTracker.ts` (`isValidDamageClaim`, `clampDamage`) | Non-finite, zero, or negative `damage`; clamps anything above `MAX_DAMAGE_PER_HIT`. |

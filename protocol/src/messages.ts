@@ -209,6 +209,44 @@ export interface SectorMirrorMessage extends EnvelopeBase {
   objectCount?: number;
 }
 
+/**
+ * C6 "Kommando-Relay" (PlanMod.md Phase 2): the first of the "jede Interaktion
+ * = eigenes Mini-Protokoll" family this milestone establishes -- Docking only
+ * for now (repair/resupply, trade, fleet commands, and mission-sharing are
+ * explicitly scoped out of this milestone, see docs/C6-messprotokoll.md).
+ *
+ * Unlike every message type before it, `dock_request`/`dock_response` are NOT
+ * broadcast to the whole session -- the relay server routes each one to
+ * exactly the one other member it concerns (server/src/server.ts's new
+ * `sendToMember`), since a docking interaction is inherently a two-party
+ * exchange (the requesting player and whichever session member actually
+ * owns/exported the target station), not something every OTHER member needs
+ * to see.
+ *
+ * `targetId`/`requesterId` reuse existing wire ids exactly like every other
+ * message type does: `targetId` is a `sector_object.objectId` (C1, the
+ * underlying real station's own game-object id on whichever member exported
+ * it); `requesterId` is the requesting player's own ship's `spawn.objectId`
+ * (A1-C2). No new id scheme was introduced for this milestone.
+ */
+export interface DockRequestMessage extends EnvelopeBase {
+  type: "dock_request";
+  /** The `sector_object.objectId` of the station being docked at. */
+  targetId: string;
+  /** The requesting player's own ship, i.e. their `spawn.objectId`. */
+  requesterId: string;
+}
+
+export interface DockResponseMessage extends EnvelopeBase {
+  type: "dock_response";
+  targetId: string;
+  requesterId: string;
+  /** Whether the member owning `targetId` confirmed the dock. */
+  approved: boolean;
+  /** Free-form, only meaningful when `approved` is false (e.g. "station no longer known"). Sanitized server-side before relaying, same trust posture as `chat.text`. */
+  reason?: string;
+}
+
 export type ProtocolMessage =
   | StateUpdateMessage
   | SpawnMessage
@@ -219,6 +257,8 @@ export type ProtocolMessage =
   | SessionMessage
   | ChatMessage
   | SectorObjectMessage
-  | SectorMirrorMessage;
+  | SectorMirrorMessage
+  | DockRequestMessage
+  | DockResponseMessage;
 
 export type MessageType = ProtocolMessage["type"];

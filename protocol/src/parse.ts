@@ -1,6 +1,8 @@
 import type {
   ChatMessage,
   DespawnMessage,
+  DockRequestMessage,
+  DockResponseMessage,
   FireEventMessage,
   HitReportMessage,
   HpStateMessage,
@@ -13,6 +15,7 @@ import type {
 } from "./messages.js";
 import {
   type Fields,
+  isBoolean,
   isNumber,
   isOptionalNumber,
   isOptionalString,
@@ -77,6 +80,10 @@ export function parseMessage(json: string): ParseResult {
       return validateSectorObject(obj);
     case "sector_mirror":
       return validateSectorMirror(obj);
+    case "dock_request":
+      return validateDockRequest(obj);
+    case "dock_response":
+      return validateDockResponse(obj);
     default:
       return fail(`unknown message type: ${String(obj.type)}`);
   }
@@ -202,4 +209,18 @@ function validateSectorMirror(obj: Fields): ParseResult {
     }
   }
   return ok(obj as unknown as SectorMirrorMessage);
+}
+
+function validateDockRequest(obj: Fields): ParseResult {
+  if (!isString(obj, "targetId")) return fail("dock_request.targetId must be a string");
+  if (!isString(obj, "requesterId")) return fail("dock_request.requesterId must be a string");
+  return ok(obj as unknown as DockRequestMessage);
+}
+
+function validateDockResponse(obj: Fields): ParseResult {
+  if (!isString(obj, "targetId")) return fail("dock_response.targetId must be a string");
+  if (!isString(obj, "requesterId")) return fail("dock_response.requesterId must be a string");
+  if (!isBoolean(obj, "approved")) return fail("dock_response.approved must be a boolean");
+  if (!isOptionalString(obj, "reason")) return fail("dock_response.reason must be a string if present");
+  return ok(obj as unknown as DockResponseMessage);
 }

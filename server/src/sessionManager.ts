@@ -40,6 +40,23 @@ export class SessionManager {
   // spawn recorded before this field existed (no caller currently omits it, but
   // treated as optional the same way category itself is).
   private shipTypeByObjectId = new Map<string, string>();
+  // objectId -> the memberId that exported it via `sector_object` (C1), populated
+  // here since C6: "Kommando-Relay" needs to route a `dock_request` to the ONE
+  // member who actually owns/exported the target station, instead of broadcasting
+  // it to the whole session the way every other sector_object-adjacent message is.
+  // A parallel map to ownerByObjectId rather than folding sector_object into that
+  // same map/lifecycle: ownerByObjectId's cleanup/respawn rules (recordSpawn's
+  // respawn-replaces semantics, hasOtherActiveSpawn's one-active-spawn cap,
+  // npcSpawnCount's category filter) are all specific to SPAWNED objects
+  // (ships/NPCs with HP and a despawn path) -- sector_object has none of that (no
+  // despawn message type has ever existed for it, C1's own deliberate choice), so
+  // reusing ownerByObjectId's machinery for it would mean bending a lifecycle
+  // built for a fundamentally different kind of thing.
+  private sectorObjectOwnerByObjectId = new Map<string, string>();
+  // memberId -> every objectId that member has ever exported via `sector_object`,
+  // so a disconnect can forget all of them (mirrors spawnsByMember/
+  // takeSpawnedObjectIds' own disconnect-cleanup shape, C6).
+  private sectorObjectIdsByMember = new Map<string, Set<string>>();
 
   /**
    * A client can only be in one session at a time, so joining calls leave()
@@ -190,6 +207,49 @@ export class SessionManager {
   /** The SpawnMessage.shipType recorded for objectId, if any (C4, same read-before-removeSpawn ordering requirement as categoryOf()). */
   shipTypeOf(objectId: string): string | undefined {
     return this.shipTypeByObjectId.get(objectId);
+  }
+
+  /**
+   * Records that memberId exported objectId via `sector_object` (C1). Unlike
+   * recordSpawn, there is no "respawn"/replace concept here -- re-exporting the
+   * same objectId (e.g. C5's sector_change re-export) just re-affirms the same
+   * ownership entry, a harmless overwrite with the same value in the common
+   * case. Called unconditionally for every inbound `sector_object`, same trust
+   * posture C1 already established for that message type (no per-sender cap,
+   * see MAX_SECTOR_OBJECTS_PER_MIRROR's own enforcement in server.ts instead).
+   */
+  recordSectorObject(memberId: string, objectId: string): void {
+    this.sectorObjectOwnerByObjectId.set(objectId, memberId);
+    const owned = this.sectorObjectIdsByMember.get(memberId) ?? new Set<string>();
+    owned.add(objectId);
+    this.sectorObjectIdsByMember.set(memberId, owned);
+  }
+
+  /**
+   * The memberId that exported objectId via `sector_object`, if any (C6
+   * "Kommando-Relay"). server.ts's `dock_request` handling routes to this
+   * member instead of broadcasting; `dock_response` handling rejects a sender
+   * who is not this member. Undefined means "nobody has exported this
+   * objectId" -- callers must treat that as "unroutable", not "anyone may
+   * claim it", same posture ownerOf() already has for spawned objects.
+   */
+  sectorObjectOwnerOf(objectId: string): string | undefined {
+    return this.sectorObjectOwnerByObjectId.get(objectId);
+  }
+
+  /**
+   * Forgets every sector_object memberId has ever exported (disconnect
+   * cleanup, C6) -- mirrors takeSpawnedObjectIds' shape for spawned objects,
+   * though sector_object has no per-session replay list to also clean up (C1
+   * never added one, "no re-export throttling", see docs/C1-messprotokoll.md).
+   */
+  forgetSectorObjectsOf(memberId: string): void {
+    const owned = this.sectorObjectIdsByMember.get(memberId);
+    this.sectorObjectIdsByMember.delete(memberId);
+    if (!owned) return;
+    for (const objectId of owned) {
+      this.sectorObjectOwnerByObjectId.delete(objectId);
+    }
   }
 
   /**

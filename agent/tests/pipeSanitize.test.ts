@@ -111,6 +111,31 @@ test("leaves a spawn with no category untouched (defaults to player behavior)", 
   assert.deepEqual(sanitizeForPipe(msg), msg);
 });
 
+// --- C6: dock_response.reason is sanitized like chat.text ---
+
+test("sanitizes dock_response.reason for control chars and MD-breaking characters", () => {
+  const msg: ProtocolMessage = {
+    ...base,
+    type: "dock_response",
+    targetId: "station-1",
+    requesterId: "ship-1",
+    approved: false,
+    reason: "denied\r\n{because}, reasons",
+  };
+  const result = sanitizeForPipe(msg) as typeof msg;
+  assert.equal(result.reason, "deniedbecause reasons");
+});
+
+test("leaves a dock_response with no reason (approved) untouched", () => {
+  const msg: ProtocolMessage = { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-1", approved: true };
+  assert.deepEqual(sanitizeForPipe(msg), msg);
+});
+
+test("leaves dock_request completely untouched (no free-form text fields)", () => {
+  const msg: ProtocolMessage = { ...base, type: "dock_request", targetId: "station-1", requesterId: "ship-1" };
+  assert.deepEqual(sanitizeForPipe(msg), msg);
+});
+
 test("does not mutate the original message object", () => {
   const msg: ProtocolMessage = { ...base, type: "chat", from: "{Clan} Bob", text: "hi" };
   const original = { ...msg };

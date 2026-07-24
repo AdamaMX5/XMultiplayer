@@ -434,7 +434,58 @@ function handleMessage(
       return;
     }
     sectorMirrorCounts.set(clientId, count);
+    // C6 "Kommando-Relay": remembers WHO exported this station/gate/asteroid
+    // field/region, so a later dock_request naming it as targetId can be
+    // routed to this exact member instead of broadcast to the whole session.
+    sessions.recordSectorObject(clientId, msg.objectId);
     broadcast(sessionCode, clientId, raw, sessions, sockets);
+    return;
+  }
+
+  // C6: dock_request is routed point-to-point to whichever member exported
+  // the target station (sectorObjectOwnerOf), never broadcast -- a docking
+  // interaction concerns exactly two members, not the whole session. Only
+  // requesterId's ownership is checked (A4 ownership authority, same as
+  // hit_report.sourceId): the requester must own the ship they claim is
+  // asking to dock, but targetId is deliberately NOT ownership-checked here
+  // for the same reason hit_report.targetId isn't -- the whole point is
+  // naming an object owned by someone ELSE.
+  if (msg.type === "dock_request") {
+    if (!requireOwnership(sessions, clientId, msg.requesterId, "dock_request", "requesterId")) return;
+    const targetOwner = sessions.sectorObjectOwnerOf(msg.targetId);
+    if (!targetOwner) {
+      console.warn(`[server] dropped dock_request from ${clientId}: targetId "${msg.targetId}" has no known exporter`);
+      return;
+    }
+    sendToMember(sessionCode, targetOwner, raw, sessions, sockets);
+    return;
+  }
+
+  // C6: dock_response must come from whoever actually owns/exported targetId
+  // (rejects a member confirming/denying a dock on a station it doesn't
+  // own) and is routed point-to-point to whoever owns the requester's ship --
+  // reusing ownerOf() (A2+) rather than a new "pending request" table, since
+  // the requester's own ship spawn already IS the routing key. KNOWN, ACCEPTED
+  // SIMPLIFICATION (protocol/protocol.md's own doc comment on this message
+  // pair): the server does not track which dock_request a dock_response
+  // actually answers, so an unsolicited dock_response naming a real
+  // requesterId would still be routed and delivered -- harmless for now, no
+  // real consequence (credits, ship-registry) is attached to `approved` yet.
+  if (msg.type === "dock_response") {
+    if (sessions.sectorObjectOwnerOf(msg.targetId) !== clientId) {
+      console.warn(`[server] dropped dock_response from ${clientId}: targetId "${msg.targetId}" is not owned by this client`);
+      return;
+    }
+    const requesterOwner = sessions.ownerOf(msg.requesterId);
+    if (!requesterOwner) {
+      console.warn(`[server] dropped dock_response from ${clientId}: requesterId "${msg.requesterId}" has no known owner`);
+      return;
+    }
+    // A5-style sanitizing: `reason` is free-form, attacker-influenced text
+    // that ends up relayed to another client and eventually through MD's
+    // string-based field extractor -- same trust posture as chat.text.
+    const sanitizedRaw = msg.reason !== undefined ? JSON.stringify({ ...msg, reason: sanitizeChatText(msg.reason) }) : raw;
+    sendToMember(sessionCode, requesterOwner, sanitizedRaw, sessions, sockets);
     return;
   }
 
@@ -605,6 +656,11 @@ function joinSession(
     console.log(`[server] ${member.playerName} (${clientId}) switched from session ${previous.sessionCode} to ${msg.sessionCode}`);
     broadcastLeave(previous.sessionCode, clientId, previous.member, sessions, sockets);
     broadcastDespawns(previous.sessionCode, clientId, sessions, hp, sockets);
+    // C6: same hygiene rationale as leaveSession's own cleanup call -- not
+    // strictly required for safety (sendToMember's own membership check
+    // already refuses to route to a clientId no longer in the OLD session),
+    // but avoids leaving a stale entry pointing at a member who has moved on.
+    sessions.forgetSectorObjectsOf(clientId);
   }
   console.log(`[server] ${member.playerName} (${clientId}) joined session ${msg.sessionCode}`);
   const sanitizedMsg: SessionMessage = { ...msg, playerName: member.playerName };
@@ -644,6 +700,27 @@ function broadcast(
   }
 }
 
+/**
+ * C6 "Kommando-Relay": sends raw to exactly ONE specific member, unlike
+ * broadcast()/broadcastToSession()'s "everyone but the sender"/"everyone"
+ * shape -- dock_request/dock_response are inherently two-party exchanges.
+ * Confirms targetMemberId is actually a CURRENT member of sessionCode before
+ * looking up a socket (defense in depth: sectorObjectOwnerOf/ownerOf are
+ * global maps, not session-scoped, the same pre-existing characteristic
+ * ownerOf's callers already rely on -- see docs/C6-messprotokoll.md -- so
+ * without this check a wire-id collision across two unrelated sessions could
+ * otherwise misroute a message cross-session). No-ops silently if the target
+ * turns out not to be a member, or its socket is gone/not open (e.g. it
+ * disconnected between the routing decision and this call) -- same
+ * "just drop, don't error" posture broadcast()/broadcastToSession() have for
+ * a missing/closed socket.
+ */
+function sendToMember(sessionCode: string, targetMemberId: string, raw: string, sessions: SessionManager, sockets: Map<string, WebSocket>): void {
+  if (!sessions.membersOf(sessionCode).some((m) => m.id === targetMemberId)) return;
+  const target = sockets.get(targetMemberId);
+  if (target && target.readyState === WebSocket.OPEN) target.send(raw);
+}
+
 function handleDisconnect(clientId: string, sessions: SessionManager, hp: HpTracker, sockets: Map<string, WebSocket>): void {
   sockets.delete(clientId);
   leaveSession(clientId, sessions, hp, sockets);
@@ -656,6 +733,13 @@ function leaveSession(clientId: string, sessions: SessionManager, hp: HpTracker,
   console.log(`[server] ${left.member.playerName} (${clientId}) left session ${left.sessionCode}`);
   broadcastLeave(left.sessionCode, clientId, left.member, sessions, sockets);
   broadcastDespawns(left.sessionCode, clientId, sessions, hp, sockets);
+  // C6: forgets every sector_object this member ever exported, so a stale
+  // sectorObjectOwnerOf entry can't route a later dock_request to a clientId
+  // that no longer has a socket at all (sendToMember would already no-op
+  // safely either way, but this avoids the entry lingering across the
+  // session's lifetime for no reason, same hygiene rationale as
+  // takeSpawnedObjectIds' own disconnect cleanup for spawns).
+  sessions.forgetSectorObjectsOf(clientId);
 }
 
 /** Despawns whatever proxies the disconnecting member had spawned, so they don't linger as ghosts for others; also forgets their HP (A4). */

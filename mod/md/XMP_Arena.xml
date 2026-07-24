@@ -120,6 +120,21 @@
     kill-feed instead of attributing it to the exporting player) is entirely
     server-side (server/src/server.ts's broadcastKillFeed, server/src/
     sessionManager.ts's new shipTypeOf()/categoryOf()) and needed no mod change.
+
+    Milestone C6 ("Kommando-Relay", Docking only, PlanMod.md Phase 2):
+    XMP_Arena_Dispatch below gets two new branches, `dock_request`/
+    `dock_response`, routing to mod/md/XMP_Coop.xml's XMP_Coop_HandleDockRequest/
+    XMP_Coop_HandleDockResponse. Unlike every other type dispatched here, these
+    two are never broadcast to the whole session server-side (server/src/
+    server.ts's new sendToMember) - a docking interaction is inherently a
+    two-party exchange between the requesting player and whichever session
+    member actually owns/exported the target station, so THIS file's dispatch
+    branch fires only for the one client the message was actually routed to,
+    same as every other type, just with a narrower audience upstream. See
+    mod/md/XMP_Coop.xml's own cue comments and docs/C6-messprotokoll.md for
+    the full design, including why PlanMod.md's other C6 sub-items (repair/
+    resupply, trade, fleet commands, mission-sharing) are explicitly out of
+    scope for this milestone.
   -->
   <cues>
     <!--
@@ -374,6 +389,17 @@
           </do_if>
           <do_if value="$XMP.RxType == 'sector_mirror'">
             <include_interrupt_actions ref="XMP_Coop_HandleSectorMirror" />
+          </do_if>
+          <!-- C6 "Kommando-Relay": dock_request only ever reaches whichever
+               member actually owns/exported the target station (server-side
+               point-to-point routing, server/src/server.ts's sendToMember),
+               and dock_response only ever reaches the requester - see
+               mod/md/XMP_Coop.xml's own cue comments for the full design. -->
+          <do_if value="$XMP.RxType == 'dock_request'">
+            <include_interrupt_actions ref="XMP_Coop_HandleDockRequest" />
+          </do_if>
+          <do_if value="$XMP.RxType == 'dock_response'">
+            <include_interrupt_actions ref="XMP_Coop_HandleDockResponse" />
           </do_if>
           <!-- Anything else (e.g. hit_report, which only ever flows client -> server,
                never back down to a client) is silently ignored: unknown/irrelevant

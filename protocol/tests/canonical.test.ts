@@ -75,6 +75,8 @@ test("roundtrip parse -> serialize -> parse is stable for every message type", (
       rotation: { qx: 0, qy: 0, qz: 0, qw: 1 },
     },
     sector_mirror: { ...base, type: "sector_mirror", action: "begin", objectCount: 12 },
+    dock_request: { ...base, type: "dock_request", targetId: "station-1", requesterId: "ship-1" },
+    dock_response: { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-1", approved: false, reason: "station no longer known" },
   };
 
   for (const [type, sample] of Object.entries(samples)) {

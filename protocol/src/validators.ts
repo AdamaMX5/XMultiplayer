@@ -37,3 +37,7 @@ export function isQuaternion(value: unknown): boolean {
 export function isStringArray(value: unknown): boolean {
   return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"));
 }
+
+export function isBoolean(obj: Fields, key: string): boolean {
+  return typeof obj[key] === "boolean";
+}

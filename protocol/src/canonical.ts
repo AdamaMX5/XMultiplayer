@@ -127,6 +127,26 @@ export function serializeCanonical(msg: ProtocolMessage): string {
         action: msg.action,
         ...(msg.objectCount !== undefined ? { objectCount: msg.objectCount } : {}),
       });
+    case "dock_request":
+      return JSON.stringify({
+        v: msg.v,
+        type: msg.type,
+        seq: msg.seq,
+        ts: msg.ts,
+        targetId: msg.targetId,
+        requesterId: msg.requesterId,
+      });
+    case "dock_response":
+      return JSON.stringify({
+        v: msg.v,
+        type: msg.type,
+        seq: msg.seq,
+        ts: msg.ts,
+        targetId: msg.targetId,
+        requesterId: msg.requesterId,
+        approved: msg.approved,
+        ...(msg.reason !== undefined ? { reason: msg.reason } : {}),
+      });
   }
 }
 

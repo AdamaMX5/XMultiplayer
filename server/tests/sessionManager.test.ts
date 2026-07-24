@@ -360,3 +360,88 @@ test("shipTypeOf() reflects a respawn's NEW shipType, not the original one", () 
 
   assert.equal(sessions.shipTypeOf("npc-1"), "new_macro");
 });
+
+// --- C6: recordSectorObject()/sectorObjectOwnerOf()/forgetSectorObjectsOf() ---
+// --- (routing dock_request to whoever exported the target station) ---
+
+test("sectorObjectOwnerOf() returns the memberId that recorded a sector_object for that objectId", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSectorObject("a", "station-1");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), "a");
+});
+
+test("sectorObjectOwnerOf() returns undefined for an objectId nobody has exported", () => {
+  const sessions = new SessionManager();
+  assert.equal(sessions.sectorObjectOwnerOf("never-exported"), undefined);
+});
+
+test("recordSectorObject() re-exporting the SAME objectId (e.g. C5 sector_change re-export) just re-affirms the same owner", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSectorObject("a", "station-1");
+  sessions.recordSectorObject("a", "station-1");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), "a");
+});
+
+test("recordSectorObject() tracks multiple distinct objectIds for the same member independently", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSectorObject("a", "station-1");
+  sessions.recordSectorObject("a", "gate-1");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), "a");
+  assert.equal(sessions.sectorObjectOwnerOf("gate-1"), "a");
+});
+
+test("sectorObjectOwnerOf() keeps different members' exported objects independent", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.join("arena-1", { id: "b", playerName: "Bob" });
+  sessions.recordSectorObject("a", "station-1");
+  sessions.recordSectorObject("b", "station-2");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), "a");
+  assert.equal(sessions.sectorObjectOwnerOf("station-2"), "b");
+});
+
+test("forgetSectorObjectsOf() forgets every objectId a member exported", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSectorObject("a", "station-1");
+  sessions.recordSectorObject("a", "gate-1");
+
+  sessions.forgetSectorObjectsOf("a");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), undefined);
+  assert.equal(sessions.sectorObjectOwnerOf("gate-1"), undefined);
+});
+
+test("forgetSectorObjectsOf() does not affect a DIFFERENT member's exported objects", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.join("arena-1", { id: "b", playerName: "Bob" });
+  sessions.recordSectorObject("a", "station-1");
+  sessions.recordSectorObject("b", "station-2");
+
+  sessions.forgetSectorObjectsOf("a");
+
+  assert.equal(sessions.sectorObjectOwnerOf("station-1"), undefined);
+  assert.equal(sessions.sectorObjectOwnerOf("station-2"), "b");
+});
+
+test("forgetSectorObjectsOf() for a member who never exported anything does not throw", () => {
+  const sessions = new SessionManager();
+  assert.doesNotThrow(() => sessions.forgetSectorObjectsOf("ghost"));
+});
+
+test("forgetSectorObjectsOf() is idempotent: a second call for the same member forgets nothing further and does not throw", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSectorObject("a", "station-1");
+
+  sessions.forgetSectorObjectsOf("a");
+  assert.doesNotThrow(() => sessions.forgetSectorObjectsOf("a"));
+});

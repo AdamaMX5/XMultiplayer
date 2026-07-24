@@ -158,6 +158,36 @@
           }
         }
       ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["targetId", "requesterId"],
+          "properties": {
+            "type": { "const": "dock_request" },
+            "targetId": { "type": "string" },
+            "requesterId": { "type": "string" }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        { "$ref": "#/definitions/envelope" },
+        {
+          "type": "object",
+          "required": ["targetId", "requesterId", "approved"],
+          "properties": {
+            "type": { "const": "dock_response" },
+            "targetId": { "type": "string" },
+            "requesterId": { "type": "string" },
+            "approved": { "type": "boolean" },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
     }
   ]
 }

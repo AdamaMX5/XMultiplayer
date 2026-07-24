@@ -197,6 +197,42 @@ test("accepts session sector_change (C5)", () => {
   assert.equal(result.ok, true);
 });
 
+test("accepts a valid dock_request (C6)", () => {
+  const msg = { ...base, type: "dock_request", targetId: "station-1", requesterId: "ship-alice" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("rejects dock_request missing requesterId", () => {
+  const msg = { ...base, type: "dock_request", targetId: "station-1" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("accepts a valid dock_response, approved with no reason", () => {
+  const msg = { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-alice", approved: true };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("accepts a valid dock_response, denied with a reason", () => {
+  const msg = { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-alice", approved: false, reason: "station no longer known" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, true);
+});
+
+test("rejects dock_response with a non-boolean approved", () => {
+  const msg = { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-alice", approved: "yes" };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
+test("rejects dock_response with a non-string reason", () => {
+  const msg = { ...base, type: "dock_response", targetId: "station-1", requesterId: "ship-alice", approved: false, reason: 42 };
+  const result = parseMessage(JSON.stringify(msg));
+  assert.equal(result.ok, false);
+});
+
 test("accepts a valid chat message", () => {
   const msg = { ...base, type: "chat", from: "Alice", text: "gg" };
   const result = parseMessage(JSON.stringify(msg));

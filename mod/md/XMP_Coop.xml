@@ -290,6 +290,70 @@
         broadcasts already have (A5), not a new one, and harmless for the
         same reason (server/src/server.ts never reads `sessionCode` for
         anything but the "join" action). See docs/C5-messprotokoll.md.
+
+    Milestone C6 ("Kommando-Relay", Docking only - PlanMod.md's own "bewusst
+    inkrementell, sortiert nach Wert/Aufwand" framing, repair/resupply/trade/
+    fleet-commands/missions explicitly deferred, developer decision): three
+    new cues below - XMP_Coop_OnDock (guest-side detection, sends
+    `dock_request`), XMP_Coop_HandleDockRequest (host-side validation +
+    `dock_response`), XMP_Coop_HandleDockResponse (guest-side reaction) - plus
+    two small additions to existing cues: XMP_Coop_FindObjectsOfClass now also
+    keeps a PERSISTENT host-side table ($XMP.CoopExportedObjectByWireId,
+    keyed by the same wire id C1 already reuses from the real object's own
+    `.id`) of every real object we've ever exported, since C1 itself only
+    ever kept a transient, export-then-discard list; XMP_Coop_HandleSectorObject
+    now also keeps a reverse lookup ($XMP.SectorProxyWireIdByGameId, mirroring
+    $XMP.ProxyWireIdByGameId's existing role for ship proxies, A4) so a local
+    docking event's game-object reference can be turned back into the wire id
+    a dock_request needs. XMP_Coop_HandleSectorChange (C5) was extended to
+    also clear the new reverse-lookup entry when tearing down a stale mirror,
+    same symmetric-cleanup rigor as everywhere else in this file.
+
+    THE CORE DESIGN QUESTION C6 HAD TO SOLVE: every message type before this
+    one was either broadcast to the whole session (state_update, spawn,
+    sector_object, ...) or server-generated (hp_state). A docking interaction
+    is inherently two-party (the requesting player and whichever member
+    exported the target station) - broadcasting it to a THIRD, uninvolved
+    member would be both wasteful and a mild information leak (who is docking
+    where). server/src/server.ts's new `sendToMember` is the fix: point-to-
+    point routing, keyed by a NEW ownership map for `sector_object`
+    (`sectorObjectOwnerOf`, server/src/sessionManager.ts) for `dock_request`,
+    and by the ALREADY-EXISTING spawn ownership map (`ownerOf`) for
+    `dock_response` - no new "pending request" bookkeeping needed, since the
+    requester's own ship spawn already IS the routing key back to them.
+
+    HONEST SCOPE OF "VALIDATION" HERE: the host only checks "do I still
+    recognize this as something I exported and that still exists"
+    ($XMP.CoopExportedObjectByWireId.{targetId}.exists) - there is no
+    economy, no access-control/role model, no ship-registry in this codebase
+    yet, so approving a dock has no further game-state consequence beyond the
+    confirmation itself. This is deliberately the FOUNDATION PlanMod.md's
+    remaining C6 sub-items (repair/resupply, trade, fleet commands) would
+    build real stakes on top of, not a complete feature on its own. See
+    docs/C6-messprotokoll.md for the full writeup, including the accepted,
+    documented risk that a dock_response is not tied to any specific
+    dock_request (no pending-request tracking exists), and the pre-existing
+    wire-id-collision risk this milestone inherits (not introduces) from every
+    earlier milestone's same "reuse the real object's own `.id` as the wire
+    id" scheme.
+
+    DELIBERATELY NOT ATTEMPTED IN C6 (same posture as C1-C5's own lists):
+      - No undocking detection/handling - there is no docked-ship registry to
+        release anything from yet, so there is nothing stateful an undock
+        event would need to clean up. Revisit once repair/resupply or trade
+        give docking real, persistent state.
+      - No pending-request tracking: the server does not remember which
+        dock_request a dock_response answers, so a member owning targetId
+        could send an unsolicited dock_response for any requesterId it can
+        name. Harmless for now (see "honest scope" above) - revisit once
+        `approved` has real stakes attached.
+      - No object-type check on the host side (a dock_request naming a gate/
+        asteroid-field/region's wire id instead of a station's would still be
+        "approved" if that id happens to still be tracked) - trusts the real
+        game's own physical docking mechanics to have already filtered this
+        (a ship cannot physically dock at a gate), same trust posture this
+        project already extends to client-side hit detection (A4) and other
+        physically-gated local events.
   -->
   <cues>
     <!--
@@ -555,9 +619,16 @@
 
           <do_all exact="$XMP.CoopSectorProxyKnownIds" counter="$XMP.CoopSectorTeardownIndex">
             <set_value name="$XMP.CoopSectorTeardownId" exact="$XMP.CoopSectorTeardownIndex.entry" />
+            <!-- C6: capture the game id BEFORE destroying the object below, so
+                 the reverse lookup (XMP_Coop_HandleSectorObject, used by
+                 XMP_Coop_OnDock) can be cleared too - same "capture before
+                 destroy" ordering XMP_Arena_DestroyProxy already uses for its
+                 own owner-name reverse lookup. -->
+            <set_value name="$XMP.CoopSectorTeardownGameId" exact="$XMP.SectorProxies.{$XMP.CoopSectorTeardownId}.id" />
             <destroy_object object="$XMP.SectorProxies.{$XMP.CoopSectorTeardownId}" explosion="false" />
             <set_value name="$XMP.SectorProxies.{$XMP.CoopSectorTeardownId}" exact="null" />
             <set_value name="$XMP.SectorProxyTypes.{$XMP.CoopSectorTeardownId}" exact="null" />
+            <set_value name="$XMP.SectorProxyWireIdByGameId.{$XMP.CoopSectorTeardownGameId}" exact="null" />
           </do_all>
           <set_value name="$XMP.CoopSectorProxyKnownIds" exact="[]" />
 
@@ -706,6 +777,21 @@
                 rotQZ=$XMP.CoopIndex.entry.quaternion.z,
                 rotQW=$XMP.CoopIndex.entry.quaternion.w
               ]" />
+            <!-- C6 "Kommando-Relay": C1 never kept a persistent reference to
+                 the REAL object behind an exported sector_object - only the
+                 transient $XMP.CoopExportObjects entry above, rebuilt from
+                 scratch on every export and read once by
+                 XMP_Coop_ExportSector before being discarded. Docking needs
+                 to look the real station back up LATER, when a dock_request
+                 arrives for its wire id (XMP_Coop_HandleDockRequest below),
+                 so a persistent host-side table is added here - the exact
+                 same gap C4 already closed for NPCs
+                 ($XMP.CoopBubbleGameObjectByWireId), just for exported
+                 sector_object entries instead of bubble-tracked NPCs. Keyed
+                 by $XMP.CoopIndex.entry.id, which IS the wire objectId (C1
+                 reuses the real object's own `.id` directly as
+                 sector_object.objectId, unchanged since C1). -->
+            <set_value name="$XMP.CoopExportedObjectByWireId.{$XMP.CoopIndex.entry.id}" exact="$XMP.CoopIndex.entry" />
           </do_all>
         </do_all>
       </actions>
@@ -823,6 +909,12 @@
                 owner="ownerless" />
               <set_value name="$XMP.SectorProxies.{$XMP.CoopRxObjectId}" exact="$XMP.NewSectorProxy" />
               <set_value name="$XMP.SectorProxyTypes.{$XMP.CoopRxObjectId}" exact="$XMP.CoopRxObjectType" />
+              <!-- C6 "Kommando-Relay": reverse lookup (game object -> wire
+                   objectId), needed by XMP_Coop_OnDock below - a docking
+                   event exposes the game object docked at, not our own wire
+                   id for it. Mirrors $XMP.ProxyWireIdByGameId's existing role
+                   for ship proxies (A4) exactly, just for sector proxies. -->
+              <set_value name="$XMP.SectorProxyWireIdByGameId.{$XMP.NewSectorProxy.id}" exact="$XMP.CoopRxObjectId" />
               <!-- C5 "Sektorwechsel": C1 tracked $XMP.SectorProxies only as a
                    keyed existence table (no iterable list), since C1 itself
                    never needed to walk "every currently mirrored sector
@@ -839,6 +931,168 @@
             <else>
               <debug_text text="'[XMultiplayer][Coop] sector_object for already-known objectId=' + $XMP.CoopRxObjectId + ', ignoring'" filter="general" />
             </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      C6 "Kommando-Relay": guest-side local docking detection. Fires (new,
+      unconfirmed assumption, same posture as every other event condition in
+      this project) whenever the LOCAL player's own ship docks at ANYTHING -
+      filtered via $XMP.SectorProxyWireIdByGameId (populated above) to only
+      react when the docked-at object is a KNOWN mirrored sector proxy;
+      docking at a real, local, non-mirrored station is completely ordinary
+      single-player X4 behavior this mod has no business intercepting.
+
+      ASSUMPTION: an `event_object_docked` condition exists, scoped to
+      `player.entity` (mirrors `event_object_fired`'s existing scoping, A4),
+      exposing the docked-at object as `event.object` (mirrors
+      `event_object_attacked`'s `event.object`, A4). If this event name/shape
+      is wrong, only this one cue needs to change - the reverse lookup and
+      the rest of the request/response flow do not depend on how the docking
+      attempt is detected.
+
+      PlanMod.md C6's own parenthetical ("Ohne Relay: rein physisches
+      Andocken am Proxy möglich, aber ohne Konsequenzen"): this cue does not
+      gate or prevent the local docking itself - by the time it fires, the
+      player has ALREADY physically docked (nothing server-side has any say
+      over local physics). What this adds is the report-and-confirm round
+      trip that turns an already-happening, consequence-free local
+      interaction into a validated, acknowledged one.
+    -->
+    <cue name="XMP_Coop_OnDock" instantiate="true">
+      <conditions>
+        <event_object_docked object="player.entity" />
+      </conditions>
+      <actions>
+        <do_if value="player.entity.exists and player.entity.isclass.ship and $XMP.SectorProxyWireIdByGameId.{event.object.id}.exists">
+          <do_all>
+            <set_value name="$XMP.Json"
+              exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;dock_request&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                + ',&quot;targetId&quot;:&quot;' + $XMP.SectorProxyWireIdByGameId.{event.object.id} + '&quot;'
+                + ',&quot;requesterId&quot;:&quot;' + player.entity.id + '&quot;'
+                + '}'" />
+            <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+            <debug_text text="'[XMultiplayer][Coop] docking at mirrored station (objectId=' + $XMP.SectorProxyWireIdByGameId.{event.object.id} + '), requesting host confirmation'" filter="general" />
+          </do_all>
+        </do_if>
+      </actions>
+      <cues>
+        <cue name="XMP_Coop_OnDock_Reset" instantiate="true">
+          <conditions>
+            <cue_completed cue="parent" />
+          </conditions>
+          <actions>
+            <reset_cue cue="parent" />
+          </actions>
+        </cue>
+      </cues>
+    </cue>
+
+    <!--
+      C6, host-side: validates an incoming dock_request against our own
+      persistent record of what we've actually exported
+      ($XMP.CoopExportedObjectByWireId, populated in
+      XMP_Coop_FindObjectsOfClass above) and responds.
+
+      HONEST LIMIT OF "VALIDATION" HERE: only "do we still recognize this as
+      something we exported and that still exists" - there is no economy, no
+      access-control/role model, no ship-registry to check against yet
+      (PlanMod.md's remaining C6 sub-items - repair/resupply, trade, fleet
+      commands - are what would eventually give a dock real stakes;
+      explicitly out of scope for this milestone, see
+      docs/C6-messprotokoll.md). Approving today has no further game-state
+      consequence beyond sending the response itself.
+
+      Builds two full, separate JSON strings (approved vs. denied) rather
+      than conditionally omitting `reason` from one shared string - this
+      codebase has no established pattern anywhere for building a JSON
+      string with a conditionally-present field (every existing sender
+      either always includes a field or never does), so branching into two
+      complete literals is the same idiom already used for e.g.
+      XMP_Arena_SetaCheck's seta_on/seta_off pair.
+    -->
+    <cue name="XMP_Coop_HandleDockRequest" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'targetId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopDockTargetId" exact="$XMP.ExtractValue" />
+
+          <set_value name="$XMP.ExtractKey" exact="'requesterId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopDockRequesterId" exact="$XMP.ExtractValue" />
+
+          <do_if value="$XMP.CoopExportedObjectByWireId.{$XMP.CoopDockTargetId}.exists">
+            <do_all>
+              <set_value name="$XMP.Json"
+                exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;dock_response&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                  + ',&quot;targetId&quot;:&quot;' + $XMP.CoopDockTargetId + '&quot;'
+                  + ',&quot;requesterId&quot;:&quot;' + $XMP.CoopDockRequesterId + '&quot;'
+                  + ',&quot;approved&quot;:true'
+                  + '}'" />
+              <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+              <debug_text text="'[XMultiplayer][Coop] dock_request approved for targetId=' + $XMP.CoopDockTargetId" filter="general" />
+            </do_all>
+            <else>
+              <do_all>
+                <set_value name="$XMP.Json"
+                  exact="'{&quot;v&quot;:1,&quot;type&quot;:&quot;dock_response&quot;,&quot;seq&quot;:0,&quot;ts&quot;:' + player.age
+                    + ',&quot;targetId&quot;:&quot;' + $XMP.CoopDockTargetId + '&quot;'
+                    + ',&quot;requesterId&quot;:&quot;' + $XMP.CoopDockRequesterId + '&quot;'
+                    + ',&quot;approved&quot;:false'
+                    + ',&quot;reason&quot;:&quot;station no longer known&quot;'
+                    + '}'" />
+                <include_interrupt_actions ref="XMP_Telemetry_WriteToPipe" />
+                <debug_text text="'[XMultiplayer][Coop] dock_request DENIED for targetId=' + $XMP.CoopDockTargetId + ' (not a currently exported station)'" filter="general" />
+              </do_all>
+            </else>
+          </do_if>
+        </do_all>
+      </actions>
+    </cue>
+
+    <!--
+      C6, guest-side: reacts to the host's confirmation/denial. The
+      requesterId == player.entity.id check is defense in depth, not
+      currently reachable in normal operation (the server already routes
+      dock_response point-to-point to whoever owns requesterId, server/src/
+      server.ts) - same belt-and-suspenders posture as
+      XMP_Arena_HandleSetaStatus's own by-name lookup guard.
+
+      "Lokale Abspielung" (PlanMod.md C6): a debug_text notification is the
+      full extent of it for V1 - same accepted, undocumented-elsewhere
+      "no real player-facing notification mechanism exists yet" limitation
+      A5 already flagged for its own kill-feed/SETA notifications
+      (docs/A5-messprotokoll.md "Nächste Schritte"), not a new gap C6
+      introduces.
+    -->
+    <cue name="XMP_Coop_HandleDockResponse" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.ExtractKey" exact="'requesterId'" />
+          <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+          <set_value name="$XMP.CoopDockRxRequesterId" exact="$XMP.ExtractValue" />
+
+          <do_if value="player.entity.exists and $XMP.CoopDockRxRequesterId == player.entity.id">
+            <do_all>
+              <set_value name="$XMP.ExtractKey" exact="'approved'" />
+              <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+              <set_value name="$XMP.CoopDockRxApproved" exact="$XMP.ExtractValue" />
+
+              <do_if value="$XMP.CoopDockRxApproved == 'true'">
+                <debug_text text="'[XMultiplayer][Coop] docking confirmed by host'" filter="general" />
+                <else>
+                  <do_all>
+                    <set_value name="$XMP.ExtractKey" exact="'reason'" />
+                    <include_interrupt_actions ref="XMP_Arena_ExtractField" />
+                    <set_value name="$XMP.CoopDockRxReason" exact="$XMP.ExtractValue" />
+                    <debug_text text="'[XMultiplayer][Coop] docking DENIED by host: ' + $XMP.CoopDockRxReason" filter="general" />
+                  </do_all>
+                </else>
+              </do_if>
+            </do_all>
           </do_if>
         </do_all>
       </actions>

@@ -4,8 +4,11 @@ import { sanitizeChatText, sanitizeForPipeExtraction, sanitizePlayerName, type P
  * Applies string-safety sanitization to every free-form, client-supplied text
  * field before a message is written into the pipe (A5 security hardening) --
  * `session.playerName`, `chat.from`, `chat.text`, `sector_object.macroName`/
- * `objectId` (C1), and, since C3, `spawn.shipType`/`objectId` but ONLY for
- * `category: "npc"` spawns (see below for why player spawns are different).
+ * `objectId` (C1), since C3 `spawn.shipType`/`objectId` but ONLY for
+ * `category: "npc"` spawns (see below for why player spawns are different),
+ * and since C6 `dock_response.reason` (free-form host-supplied text, same
+ * trust posture as `chat.text` -- protocol/protocol.md's own doc comment on
+ * this message pair).
  * Everything else in the protocol is either server-controlled (e.g.
  * `hp_state`, never client-originated), or a client-supplied id/name that IS
  * still free-form but happens not to be exercised by any attack this project
@@ -51,6 +54,18 @@ export function sanitizeForPipe(msg: ProtocolMessage): ProtocolMessage {
   }
   if (msg.type === "spawn" && msg.category === "npc") {
     return { ...msg, objectId: sanitizeForPipeExtraction(msg.objectId), shipType: sanitizeForPipeExtraction(msg.shipType) };
+  }
+  if (msg.type === "dock_response" && msg.reason !== undefined) {
+    // C6: reason is free-form text supplied by whichever member owns the
+    // target station, relayed to the requester and then into the requester's
+    // OWN pipe -- same trust posture and same two-layer treatment as
+    // chat.text (sanitizeChatText already ran server-side, server/src/
+    // server.ts, before this ever reached the agent; sanitizeForPipeExtraction
+    // here is the SECOND, pipe-specific layer, protecting sibling fields in
+    // the SAME JSON line -- targetId/requesterId/approved -- from a literal
+    // '{'/'}'/','  inside reason corrupting XMP_Arena_ExtractField's naive
+    // string-search extraction of them).
+    return { ...msg, reason: sanitizeForPipeExtraction(sanitizeChatText(msg.reason)) };
   }
   return msg;
 }
