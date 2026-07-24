@@ -322,6 +322,55 @@ test("A5 kill-feed: destruction broadcasts a chat message naming both the attack
   wss.close();
 });
 
+test("C4 kill-feed: destroying an NPC names it by shipType, not the exporting player's own name", async () => {
+  const { wss, port } = await startTestServer();
+  const a = new WebSocket(`ws://localhost:${port}`);
+  const b = new WebSocket(`ws://localhost:${port}`);
+  await Promise.all([once(a, "open"), once(b, "open")]);
+
+  a.send(joinMessage("arena-npc-killfeed", "Alice"));
+  b.send(joinMessage("arena-npc-killfeed", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Alice exports a nearby NPC (C3 category="npc" spawn) -- she is its "owner"
+  // on the wire the same way she owns her own ship, but she never PILOTS it.
+  a.send(
+    JSON.stringify({
+      v: 1,
+      type: "spawn",
+      seq: 0,
+      ts: Date.now(),
+      objectId: "npc-1",
+      shipType: "ship_par_s_scout_01_a_macro",
+      owner: "Alice",
+      category: "npc",
+    })
+  );
+  // Bob (a different member than the exporter) needs to own a spawn of his own
+  // before the server accepts a hit_report with a sourceId he owns (A4
+  // ownership authority, requireOwnership() in server.ts).
+  b.send(spawnMessage("ship-bob", "Bob"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const bMessages: string[] = [];
+  b.on("message", (data) => bMessages.push(data.toString()));
+  b.send(hitReportMessage("npc-1", "ship-bob", DEFAULT_HULL, "hull"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const parsedB = bMessages.map((m) => JSON.parse(m));
+  const killFeed = parsedB.find((m) => m.type === "chat");
+  assert.ok(killFeed, `attacker must also receive the kill-feed chat message, got: ${bMessages.join(", ")}`);
+  assert.equal(killFeed.from, "server");
+  assert.equal(
+    killFeed.text,
+    "Bob destroyed ship_par_s_scout_01_a_macro",
+    "an NPC victim must be named by its shipType, never by the exporting player's own name (docs/C3-messprotokoll.md section 5.6)"
+  );
+
+  a.close();
+  b.close();
+  wss.close();
+});
+
 test("a late-joining member is replayed previously spawned proxies", async () => {
   const { wss, port } = await startTestServer();
   const a = new WebSocket(`ws://localhost:${port}`);

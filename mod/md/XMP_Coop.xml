@@ -232,18 +232,14 @@
         (MAX_MACRO_NAME_LENGTH, applies to EVERY spawn.shipType since C3,
         protocol/src/parse.ts) and sanitized before reaching the pipe
         (agent/src/pipeSanitize.ts), but not whitelisted.
-      - No explicit hit-relay/kill-attribution design for NPCs - PlanMod.md
-        scopes that to C4 ("Hit-Relay auf NPCs") explicitly. Because NPC
-        proxies reuse XMP_Arena_HandleSpawn as-is, they already inherit A4's
-        UNSCOPED, universe-wide event_object_attacked hook
-        (XMP_Arena_OnProxyAttacked) - meaning hit_report/hp_state/
-        destruction ALREADY technically flow for an NPC proxy today, as an
-        emergent side effect of reuse, not a deliberate C3 feature. The one
-        known rough edge: the kill-feed (server.ts's broadcastKillFeed)
-        would attribute an NPC's destruction to the EXPORTING player's own
-        name ("Alice destroyed <NPC's real name, if any>"), since spawn.owner
-        is that player's clientId for NPCs the same as for their own ship -
-        accepted for V1, proper NPC-specific naming/attribution is C4's job.
+      - No explicit hit-relay/kill-attribution design for NPCs in C3 itself -
+        PlanMod.md scoped that to C4 ("Hit-Relay auf NPCs"), now added below
+        (XMP_Coop_BubbleCheck's new $XMP.CoopBubbleGameObjectByWireId tracking
+        and the new XMP_Coop_ForgetBubbleNpc cue, consumed by
+        mod/md/XMP_Arena.xml's XMP_Arena_HandleHpState's new third branch) and
+        server-side (server/src/server.ts's broadcastKillFeed now names an NPC
+        victim by its shipType instead of the exporting player's own name -
+        see that function's own doc comment). See docs/C4-messprotokoll.md.
   -->
   <cues>
     <!--
@@ -748,6 +744,18 @@
                 <do_all>
                   <set_value name="$XMP.CoopBubbleTrackedCount" exact="$XMP.CoopBubbleTrackedCount + 1" />
                   <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopBubbleEntry.id}" exact="player.age" />
+                  <!-- C4 "Hit-Relay auf NPCs": keeps a live reference to the REAL
+                       local game object for this NPC, refreshed every tick it is
+                       still in the bubble (both the "already known" and "newly
+                       found" branches below need this, so it is set here, before
+                       the known/new do_if). XMP_Arena_HandleHpState
+                       (mod/md/XMP_Arena.xml) reads this table to apply
+                       server-authoritative damage to the ACTUAL NPC object -
+                       nothing else in this file kept any object handle around for
+                       it before C4 (only its position/rotation/velocity/hull/
+                       shield SNAPSHOT fields were read out of $XMP.CoopBubbleEntry
+                       and discarded once this loop iteration ended). -->
+                  <set_value name="$XMP.CoopBubbleGameObjectByWireId.{$XMP.CoopBubbleEntry.id}" exact="$XMP.CoopBubbleEntry" />
 
                   <do_if value="not $XMP.CoopBubbleKnown.{$XMP.CoopBubbleEntry.id}.exists">
                     <do_all>
@@ -806,6 +814,12 @@
                        re-entry) growth of that table over a play session.
                        Cleared here too now, symmetrically. -->
                   <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopBubbleCheckId}" exact="null" />
+                  <!-- C4: same symmetric-cleanup rationale as the LastSeenAt fix
+                       just above, applied to the game-object-reference table this
+                       milestone adds - an NPC that simply drifts back out of
+                       radius (not destroyed) must not leave a stale reference
+                       behind either. -->
+                  <set_value name="$XMP.CoopBubbleGameObjectByWireId.{$XMP.CoopBubbleCheckId}" exact="null" />
                   <debug_text text="'[XMultiplayer][Coop] npc left bubble: objectId=' + $XMP.CoopBubbleCheckId" filter="general" />
                 </do_all>
                 <else>
@@ -827,6 +841,41 @@
           </actions>
         </cue>
       </cues>
+    </cue>
+
+    <!--
+      C4 "Hit-Relay auf NPCs": shared cleanup for a real, locally-tracked NPC
+      that was destroyed via server-authoritative hp_state
+      (mod/md/XMP_Arena.xml's XMP_Arena_HandleHpState's new third branch),
+      called OUTSIDE XMP_Coop_BubbleCheck's own tick loop - unlike that cue's
+      inline stale-timeout cleanup above (which rebuilds
+      $XMP.CoopBubbleKnownIds as part of ALREADY iterating it), this is a
+      one-off removal triggered by combat, not by the next bubble tick
+      noticing the object is gone on its own. Caller sets
+      $XMP.CoopForgetObjectId before including this cue. Rebuilds
+      $XMP.CoopBubbleKnownIds excluding that id (same "rebuild, don't mutate
+      in place" idiom as the stale-timeout pass above and C1's
+      $XMP.CoopExportObjects), so a real kill does not leave a stale entry
+      that the NEXT BubbleCheck tick's stale-timeout pass would otherwise
+      (harmlessly, but redundantly) also try to despawn minutes later with the
+      misleading reason "left_bubble" for an object that was actually
+      destroyed, not merely out of radius.
+    -->
+    <cue name="XMP_Coop_ForgetBubbleNpc" instantiate="false">
+      <actions>
+        <do_all>
+          <set_value name="$XMP.CoopForgetSurvivingIds" exact="[]" />
+          <do_all exact="$XMP.CoopBubbleKnownIds" counter="$XMP.CoopForgetIndex">
+            <do_if value="$XMP.CoopForgetIndex.entry != $XMP.CoopForgetObjectId">
+              <append_to_list name="$XMP.CoopForgetSurvivingIds" exact="$XMP.CoopForgetIndex.entry" />
+            </do_if>
+          </do_all>
+          <set_value name="$XMP.CoopBubbleKnownIds" exact="$XMP.CoopForgetSurvivingIds" />
+          <set_value name="$XMP.CoopBubbleKnown.{$XMP.CoopForgetObjectId}" exact="null" />
+          <set_value name="$XMP.CoopBubbleLastSeenAt.{$XMP.CoopForgetObjectId}" exact="null" />
+          <set_value name="$XMP.CoopBubbleGameObjectByWireId.{$XMP.CoopForgetObjectId}" exact="null" />
+        </do_all>
+      </actions>
     </cue>
   </cues>
 </mdscript>

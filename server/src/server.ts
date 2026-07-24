@@ -14,6 +14,7 @@ import {
   sanitizePlayerName,
   type HitReportMessage,
   type SessionMessage,
+  type SpawnCategory,
 } from "@xmultiplayer/protocol";
 import { SessionManager, type SessionMember } from "./sessionManager.js";
 import { clampDamage, HpTracker, isDestroyed, isValidDamageClaim, isValidStartingHp } from "./hpTracker.js";
@@ -357,7 +358,7 @@ function handleMessage(
       console.warn(`[server] dropped spawn from ${clientId}: objectId "${msg.objectId}" is still active, must be destroyed/despawned before respawning`);
       return;
     }
-    sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw, category);
+    sessions.recordSpawn(sessionCode, clientId, msg.objectId, raw, category, msg.shipType);
     // maxHull/maxShield (A4): sender-supplied starting HP, falling back to the
     // fixed defaults when absent OR out of range -- untrusted client input, same
     // trust-boundary rationale as hit_report.damage (isValidDamageClaim/
@@ -517,25 +518,47 @@ function destroyObject(
   hp: HpTracker,
   sockets: Map<string, WebSocket>
 ): void {
-  // Captured BEFORE removeSpawn() below wipes ownerByObjectId's entry for objectId.
+  // Captured BEFORE removeSpawn() below wipes ownerByObjectId/categoryByObjectId/
+  // shipTypeByObjectId's entries for objectId. C4: category/shipType are needed
+  // by broadcastKillFeed to name an NPC victim correctly (see that function's
+  // own doc comment) -- same "read before removeSpawn" ordering requirement
+  // ownerOf() already had for victimClientId.
   const victimClientId = sessions.ownerOf(objectId);
+  const victimCategory = sessions.categoryOf(objectId);
+  const victimShipType = sessions.shipTypeOf(objectId);
   hp.remove(sessionCode, objectId);
   sessions.removeSpawn(sessionCode, objectId);
   console.log(`[server] ${objectId} destroyed (hull reached 0) in session ${sessionCode}`);
   const despawnMsg = JSON.stringify({ v: 1, type: "despawn", seq: 0, ts: Date.now(), objectId, reason: "destroyed" });
   broadcastToSession(sessionCode, despawnMsg, sessions, sockets);
-  broadcastKillFeed(sessionCode, attackerClientId, victimClientId, sessions, sockets);
+  broadcastKillFeed(sessionCode, attackerClientId, victimClientId, victimCategory, victimShipType, sessions, sockets);
 }
 
+/**
+ * C4 fix (docs/C3-messprotokoll.md section 5.6's documented "emergent, not
+ * intended" flaw): before this milestone, an NPC's destruction was attributed
+ * to the EXPORTING player's own name (spawn.owner is that player's clientId
+ * for "npc"-category spawns the same as for their own ship, so victimClientId
+ * resolved to the exporter, not the NPC). Now an "npc"-category victim is
+ * named by its shipType instead of looking up a player at all -- there is no
+ * player to attribute an NPC's destruction to. `victimShipType` is expected to
+ * always be present for a real spawn (SpawnMessage.shipType is a required wire
+ * field), the fallback is defensive only.
+ */
 function broadcastKillFeed(
   sessionCode: string,
   attackerClientId: string,
   victimClientId: string | undefined,
+  victimCategory: SpawnCategory | undefined,
+  victimShipType: string | undefined,
   sessions: SessionManager,
   sockets: Map<string, WebSocket>
 ): void {
   const attackerName = sessions.memberOf(sessionCode, attackerClientId)?.playerName ?? "unknown";
-  const victimName = (victimClientId && sessions.memberOf(sessionCode, victimClientId)?.playerName) || "unknown";
+  const victimName =
+    victimCategory === "npc"
+      ? victimShipType ?? "an NPC ship"
+      : (victimClientId && sessions.memberOf(sessionCode, victimClientId)?.playerName) || "unknown";
   const killFeedMsg = JSON.stringify({
     v: 1,
     type: "chat",

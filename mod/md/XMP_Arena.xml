@@ -101,6 +101,25 @@
     assumption list for this milestone (its enumeration of sector content is the
     single highest-risk item added since A5). Nothing in THIS file changed besides
     the three new dispatch branches.
+
+    Milestone C4 ("Hit-Relay auf NPCs", PlanMod.md Phase 2): XMP_Arena_HandleHpState
+    below gets a third branch, alongside its existing "our own ship"/"a mirrored
+    proxy" cases: an objectId that is neither of those but IS one of OUR OWN
+    real, locally-tracked NPCs (mod/md/XMP_Coop.xml's XMP_Coop_BubbleCheck,
+    which since C4 keeps a live reference to the real game object in
+    $XMP.CoopBubbleGameObjectByWireId) now actually receives
+    set_object_hull/set_object_shield, and destroy_object on hull reaching 0 -
+    see that branch's own inline comment for the full reasoning, the accepted
+    "no faction reputation consequence either way" limitation, and the accepted
+    NPC-reaction latency framing. Before C4, hit_report/hp_state already flowed
+    mechanically for an NPC (docs/C3-messprotokoll.md section 5.6, an emergent
+    side effect of NPCs reusing XMP_Arena_HandleSpawn as-is) but this cue had
+    no branch to land in for the exporting member's OWN copy of that NPC, so
+    the real object silently never took damage - only remote members' PROXIES
+    of it did. C4's other half (naming an NPC's destruction correctly in the
+    kill-feed instead of attributing it to the exporting player) is entirely
+    server-side (server/src/server.ts's broadcastKillFeed, server/src/
+    sessionManager.ts's new shipTypeOf()/categoryOf()) and needed no mod change.
   -->
   <cues>
     <!--
@@ -763,6 +782,73 @@
                     </do_all>
                   </do_if>
                 </do_all>
+                <!--
+                  C4 "Hit-Relay auf NPCs" third case: objectId is neither our own
+                  ship nor a mirrored proxy of another session member, but IS one
+                  of OUR OWN real, locally-tracked NPCs (mod/md/XMP_Coop.xml's
+                  XMP_Coop_BubbleCheck, which exports it to other members as a
+                  category="npc" spawn and keeps a live reference to the REAL
+                  game object in $XMP.CoopBubbleGameObjectByWireId, C4). Unlike
+                  the two cases above, this is the first time this cue applies
+                  set_object_hull/set_object_shield/destroy_object to a REAL
+                  object that is neither the player's own ship nor an
+                  invulnerable proxy - the assumption these three actions work
+                  identically on any local ship object regardless of who piloted
+                  it into existence (create_ship for a proxy vs. however the
+                  game itself spawned this NPC) is new, unconfirmed like
+                  everything else MD-side in this project. This is what actually
+                  fulfills PlanMod.md C4's "Host wendet Schaden in der echten
+                  Simulation an" - before C4, a hit_report against an NPC
+                  already flowed mechanically (docs/C3-messprotokoll.md section
+                  5.6: NPCs inherit A4's unscoped event_object_attacked hook
+                  as an emergent side effect of reusing XMP_Arena_HandleSpawn
+                  as-is) but this cue had no third branch to land in, so an
+                  hp_state for a real NPC's objectId silently did nothing at
+                  all here on the exporting member's own client - the REAL NPC
+                  never actually took damage, only remote members' PROXIES of
+                  it (via the branch above, on THEIR clients) ever updated.
+
+                  KNOWN, ACCEPTED LIMITATION (PlanMod.md C4 "Reputation! Vorsicht
+                  mit Fraktions-Konsequenzen", explicitly flagged, not solved
+                  here): destroy_object below carries no simulated attacker/
+                  weapon, so X4's own faction reputation system registers no
+                  standing change either way for this kill - a guest destroying
+                  a hostile NPC earns the host's faction no reputation benefit,
+                  but a guest destroying a FRIENDLY NPC also costs the host's
+                  faction standing nothing. Deliberately safe-by-omission rather
+                  than attempting real reputation crediting (which would need an
+                  assumed API to charge/credit a specific faction relation this
+                  codebase has never used, and PlanMod.md's own phrasing frames
+                  as a risk to avoid, not a feature to chase, for V1).
+
+                  NPC-reaction latency (PlanMod.md C4 "Erwartung dokumentieren"):
+                  damage reaches the REAL NPC only after the full round trip -
+                  the attacking member's local hit detection
+                  (XMP_Arena_OnProxyAttacked) reports hit_report to the relay
+                  server, which resolves it into hp_state and broadcasts it back
+                  to every member, including this one. Whatever vanilla AI
+                  reaction the NPC has to taking damage (evasion, fighting back,
+                  fleeing) only starts after that round trip, same accepted
+                  latency framing as A4's own "hit around a corner" limitation -
+                  good enough for escort/support fire, not for precise
+                  fast-focus-fire expectations (PlanMod.md's own wording).
+                -->
+                <else>
+                  <do_if value="$XMP.CoopBubbleGameObjectByWireId.{$XMP.RxObjectId}.exists">
+                    <do_all>
+                      <set_object_hull object="$XMP.CoopBubbleGameObjectByWireId.{$XMP.RxObjectId}" exact="$XMP.RxHull" />
+                      <set_object_shield object="$XMP.CoopBubbleGameObjectByWireId.{$XMP.RxObjectId}" exact="$XMP.RxShield" />
+                      <do_if value="$XMP.RxHull &lt;= 0">
+                        <do_all>
+                          <destroy_object object="$XMP.CoopBubbleGameObjectByWireId.{$XMP.RxObjectId}" explosion="true" />
+                          <set_value name="$XMP.CoopForgetObjectId" exact="$XMP.RxObjectId" />
+                          <include_interrupt_actions ref="XMP_Coop_ForgetBubbleNpc" />
+                          <debug_text text="'[XMultiplayer][Coop] real NPC objectId=' + $XMP.RxObjectId + ' destroyed in host simulation (server-confirmed)'" filter="general" />
+                        </do_all>
+                      </do_if>
+                    </do_all>
+                  </do_if>
+                </else>
               </do_if>
             </else>
           </do_if>

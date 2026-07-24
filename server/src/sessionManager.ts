@@ -32,6 +32,14 @@ export class SessionManager {
   // string -- npcSpawnCount() below needs to filter spawnsByMember by category
   // without re-parsing every member's raw spawn line on every spawn attempt.
   private categoryByObjectId = new Map<string, SpawnCategory>();
+  // objectId -> its SpawnMessage.shipType (C4), same parallel-map idiom as
+  // categoryByObjectId. Needed so the kill-feed (server.ts's broadcastKillFeed)
+  // can name a destroyed NPC by its ship type instead of misattributing it to
+  // the exporting player's own name (docs/C3-messprotokoll.md section 5.6's
+  // documented "emergent, not intended" flaw, fixed in C4) -- undefined for any
+  // spawn recorded before this field existed (no caller currently omits it, but
+  // treated as optional the same way category itself is).
+  private shipTypeByObjectId = new Map<string, string>();
 
   /**
    * A client can only be in one session at a time, so joining calls leave()
@@ -104,8 +112,11 @@ export class SessionManager {
    * Records that memberId spawned objectId in sessionCode, keeping the raw
    * message for replay. `category` defaults to "player" (C3): every A1-C2
    * caller predates the category field and means a player-ship spawn.
+   * `shipType` (C4) is optional so pre-C4 test callers stay valid; server.ts's
+   * one real caller always supplies it (SpawnMessage.shipType is a required
+   * field on the wire, protocol/src/parse.ts).
    */
-  recordSpawn(sessionCode: string, memberId: string, objectId: string, raw: string, category: SpawnCategory = "player"): void {
+  recordSpawn(sessionCode: string, memberId: string, objectId: string, raw: string, category: SpawnCategory = "player", shipType?: string): void {
     const bySession = this.spawnsBySession.get(sessionCode) ?? new Map<string, string>();
     bySession.set(objectId, raw);
     this.spawnsBySession.set(sessionCode, bySession);
@@ -114,6 +125,7 @@ export class SessionManager {
     this.spawnsByMember.set(memberId, owned);
     this.ownerByObjectId.set(objectId, memberId);
     this.categoryByObjectId.set(objectId, category);
+    if (shipType !== undefined) this.shipTypeByObjectId.set(objectId, shipType);
   }
 
   /** Raw spawn messages currently known for a session, e.g. to replay to a newly joined member. */
@@ -132,6 +144,7 @@ export class SessionManager {
       bySession?.delete(objectId);
       this.ownerByObjectId.delete(objectId);
       this.categoryByObjectId.delete(objectId);
+      this.shipTypeByObjectId.delete(objectId);
     }
     return [...owned];
   }
@@ -148,6 +161,7 @@ export class SessionManager {
       this.spawnsByMember.get(memberId)?.delete(objectId);
       this.ownerByObjectId.delete(objectId);
       this.categoryByObjectId.delete(objectId);
+      this.shipTypeByObjectId.delete(objectId);
     }
   }
 
@@ -160,6 +174,22 @@ export class SessionManager {
    */
   ownerOf(objectId: string): string | undefined {
     return this.ownerByObjectId.get(objectId);
+  }
+
+  /**
+   * The SpawnMessage.category recorded for objectId, if any (C4, server.ts's
+   * destroyObject/broadcastKillFeed: an NPC's destruction must be named
+   * differently from a player ship's). Must be read BEFORE removeSpawn()/
+   * takeSpawnedObjectIds() forgets it, same ordering requirement as ownerOf()
+   * already has for the kill-feed's attacker/victim lookup.
+   */
+  categoryOf(objectId: string): SpawnCategory | undefined {
+    return this.categoryByObjectId.get(objectId);
+  }
+
+  /** The SpawnMessage.shipType recorded for objectId, if any (C4, same read-before-removeSpawn ordering requirement as categoryOf()). */
+  shipTypeOf(objectId: string): string | undefined {
+    return this.shipTypeByObjectId.get(objectId);
   }
 
   /**

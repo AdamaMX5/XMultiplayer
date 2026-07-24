@@ -291,3 +291,72 @@ test("hasOtherActiveSpawn() is true when the member has an npc spawn plus a diff
 
   assert.equal(sessions.hasOtherActiveSpawn("a", "ship-alice-1"), true);
 });
+
+// --- C4: categoryOf()/shipTypeOf() (server.ts's broadcastKillFeed needs both, ---
+// --- read BEFORE removeSpawn()/takeSpawnedObjectIds() forgets them) ---
+
+test("categoryOf() returns the category recorded for objectId", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc", "ship_par_s_scout_01_a_macro");
+
+  assert.equal(sessions.categoryOf("npc-1"), "npc");
+});
+
+test("categoryOf() defaults to \"player\" when the caller omitted category, mirroring npcSpawnCount()'s own default", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}');
+
+  assert.equal(sessions.categoryOf("ship-alice-1"), "player");
+});
+
+test("categoryOf() returns undefined for an objectId nobody has spawned", () => {
+  const sessions = new SessionManager();
+  assert.equal(sessions.categoryOf("never-spawned"), undefined);
+});
+
+test("shipTypeOf() returns the shipType recorded for objectId", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc", "ship_par_s_scout_01_a_macro");
+
+  assert.equal(sessions.shipTypeOf("npc-1"), "ship_par_s_scout_01_a_macro");
+});
+
+test("shipTypeOf() returns undefined when the caller omitted shipType (pre-C4 test callers)", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "ship-alice-1", '{"objectId":"ship-alice-1"}');
+
+  assert.equal(sessions.shipTypeOf("ship-alice-1"), undefined);
+});
+
+test("categoryOf()/shipTypeOf() are forgotten after removeSpawn(), symmetric with ownerOf()", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc", "ship_par_s_scout_01_a_macro");
+
+  sessions.removeSpawn("arena-1", "npc-1");
+  assert.equal(sessions.categoryOf("npc-1"), undefined);
+  assert.equal(sessions.shipTypeOf("npc-1"), undefined);
+});
+
+test("categoryOf()/shipTypeOf() are forgotten after takeSpawnedObjectIds(), symmetric with ownerOf()", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"objectId":"npc-1"}', "npc", "ship_par_s_scout_01_a_macro");
+
+  sessions.takeSpawnedObjectIds("a", "arena-1");
+  assert.equal(sessions.categoryOf("npc-1"), undefined);
+  assert.equal(sessions.shipTypeOf("npc-1"), undefined);
+});
+
+test("shipTypeOf() reflects a respawn's NEW shipType, not the original one", () => {
+  const sessions = new SessionManager();
+  sessions.join("arena-1", { id: "a", playerName: "Alice" });
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"shipType":"old"}', "npc", "old_macro");
+  sessions.recordSpawn("arena-1", "a", "npc-1", '{"shipType":"new"}', "npc", "new_macro");
+
+  assert.equal(sessions.shipTypeOf("npc-1"), "new_macro");
+});
